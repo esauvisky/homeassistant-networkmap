@@ -1,0 +1,19 @@
+{
+  "domain": "networkmap",
+  "name": "Network Map",
+  "codeowners": [
+    "@esauvisky"
+  ],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://www.home-assistant.io/integrations/networkmap",
+  "iot_class": "local_polling",
+  "requirements": [
+    "paramiko==3.3.0",
+    "getmac==0.9.5",
+    "aiooui==0.1.9"
+  ],
+  "ssdp": [],
+  "zeroconf": [],
+  "version": "0.0.1"
+}

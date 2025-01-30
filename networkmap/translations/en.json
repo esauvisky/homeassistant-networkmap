@@ -1,0 +1,33 @@
+{
+    "config": {
+        "abort": {
+            "already_configured": "Router is already configured"
+        },
+        "error": {
+            "cannot_connect": "Failed to connect to the router",
+            "invalid_auth": "Invalid authentication, please check credentials",
+            "unknown": "Unexpected error"
+        },
+        "step": {
+            "user": {
+                "data": {
+                    "host": "Router Host",
+                    "port": "Router Port",
+                    "username": "Username",
+                    "password": "Password"
+                },
+                "description": "Enter your router connection details."
+            }
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "data": {
+                    "scan_interval": "Scan interval (seconds, minimum 10)"
+                }
+            }
+        }
+    },
+    "title": "Network Map"
+}
