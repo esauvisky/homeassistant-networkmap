@@ -9,9 +9,9 @@
   "documentation": "https://www.home-assistant.io/integrations/networkmap",
   "iot_class": "local_polling",
   "requirements": [
-    "paramiko==3.3.0",
     "getmac==0.9.5",
-    "aiooui==0.1.9"
+    "aiooui==0.1.9",
+    "aiohttp==3.11.16"
   ],
   "ssdp": [],
   "zeroconf": [],

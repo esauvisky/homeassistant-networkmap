@@ -62,12 +62,21 @@ class NetworkMapDeviceTrackerEntity(ScannerEntity):
     @property
     def _device(self) -> NetworkDevice:
         """Return NetworkDevice object."""
+        # Safely get the device, returning a default if not found
+        if self._mac_address not in self._scanner._devices:  # pylint: disable=protected-access
+            _LOGGER.warning("Device %s not found in scanner devices", self._mac_address)
+            # Return a default device to prevent KeyError
+            default_device = NetworkDevice(self._mac_address)
+            default_device.name = f"Unknown {self._mac_address[-4:]}"
+            default_device.online = False
+            return default_device
         return self._scanner._devices[self._mac_address]  # pylint: disable=protected-access
 
     @property
     def unique_id(self) -> str:
         """Return unique ID."""
-        return self._mac_address
+        # Add a prefix to ensure uniqueness across different integrations
+        return f"{DOMAIN}_{self._mac_address}"
 
     @property
     def name(self) -> str:
@@ -101,20 +110,47 @@ class NetworkMapDeviceTrackerEntity(ScannerEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return device state attributes."""
         device = self._device
-        return {
+        attributes = {
+            "vendor": device.vendor,
             "vendor_class": device.vendor_class,
-            "device_type": device.type,
-            "os_type": device.os_type,
-            "rssi": device.rssi,
-            "current_tx_rate": device.cur_tx,
-            "current_rx_rate": device.cur_rx,
-            "connection_time": device.connection_time,
-            "is_2g": device.is_2g,
-            "is_5g": device.is_5g,
-            "last_update": device.last_update.isoformat(timespec="seconds")
-            if device.last_update
-            else None,
+            "last_update": device.last_update.isoformat(timespec="seconds") if device.last_update else None,
         }
+        
+        # Add optional attributes only if they have values
+        if device.first_seen:
+            attributes["first_seen"] = device.first_seen
+            
+        if device.last_seen:
+            attributes["last_seen"] = device.last_seen
+            
+        if device.type:
+            attributes["device_type"] = device.type
+            
+        if device.os_type:
+            attributes["os_type"] = device.os_type
+            
+        if device.rssi:
+            attributes["rssi"] = device.rssi
+            
+        if device.cur_tx:
+            attributes["current_tx_rate"] = device.cur_tx
+            
+        if device.cur_rx:
+            attributes["current_rx_rate"] = device.cur_rx
+            
+        if device.connection_time:
+            attributes["connection_time"] = device.connection_time
+            
+        if device.is_2g:
+            attributes["is_2g"] = device.is_2g
+            
+        if device.is_5g:
+            attributes["is_5g"] = device.is_5g
+            
+        if device.is_wireless:
+            attributes["is_wireless"] = device.is_wireless
+            
+        return attributes
 
     @property
     def entity_registry_enabled_default(self) -> bool:
@@ -126,8 +162,11 @@ class NetworkMapDeviceTrackerEntity(ScannerEntity):
     @callback
     def async_on_demand_update(self, online: bool) -> None:
         """Update state."""
-        self._active = online
-        self.async_write_ha_state()
+        try:
+            self._active = online
+            self.async_write_ha_state()
+        except Exception as ex:
+            _LOGGER.error("Error updating device %s: %s", self._mac_address, ex)
 
     async def async_added_to_hass(self) -> None:
         """Register state update callback."""

@@ -1,22 +1,29 @@
 {
     "config": {
         "abort": {
-            "already_configured": "Router is already configured"
+            "already_configured": "Bettercap instance is already configured"
         },
         "error": {
-            "cannot_connect": "Failed to connect to the router",
+            "cannot_connect": "Failed to connect to Bettercap",
             "invalid_auth": "Invalid authentication, please check credentials",
             "unknown": "Unexpected error"
         },
         "step": {
             "user": {
                 "data": {
-                    "host": "Router Host",
-                    "port": "Router Port",
+                    "host": "Bettercap Host",
+                    "port": "Bettercap API Port",
                     "username": "Username",
-                    "password": "Password"
+                    "password": "Password",
+                    "api_key": "API Key (if required)",
+                    "enable_net_probe": "Enable network probing (discovers devices)",
+                    "enable_net_sniff": "Enable network sniffing (captures traffic)",
+                    "enable_arp_spoof": "Enable ARP spoofing (MITM, use with caution)",
+                    "enable_ticker": "Enable ticker (periodic status updates)",
+                    "enable_net_recon": "Enable network reconnaissance (ARP cache monitoring)",
+                    "enable_zerogod": "Enable Zeroconf/mDNS discovery (finds Bonjour services)"
                 },
-                "description": "Enter your router connection details."
+                "description": "Enter your Bettercap connection details."
             }
         }
     },

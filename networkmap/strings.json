@@ -6,9 +6,16 @@
           "host": "[%key:common::config_flow::data::host%]",
           "port": "[%key:common::config_flow::data::port%]",
           "username": "[%key:common::config_flow::data::username%]",
-          "password": "[%key:common::config_flow::data::password%]"
+          "password": "[%key:common::config_flow::data::password%]",
+          "api_key": "API Key (if required)",
+          "enable_net_probe": "Enable network probing (discovers devices)",
+          "enable_net_sniff": "Enable network sniffing (captures traffic)",
+          "enable_arp_spoof": "Enable ARP spoofing (MITM, use with caution)",
+          "enable_ticker": "Enable ticker (periodic status updates)",
+          "enable_net_recon": "Enable network reconnaissance (ARP cache monitoring)",
+          "enable_zerogod": "Enable Zeroconf/mDNS discovery (finds Bonjour services)"
         },
-        "description": "Enter your router connection details."
+        "description": "Enter your Bettercap connection details."
       }
     },
     "error": {

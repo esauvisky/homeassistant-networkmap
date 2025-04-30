@@ -8,8 +8,8 @@ from datetime import datetime
 import logging
 from typing import Any
 
-import paramiko
 import json
+import aiohttp
 
 import aiooui
 from getmac import get_mac_address
@@ -25,6 +25,7 @@ from homeassistant.const import (
 from homeassistant.core import CoreState, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv, entity_registry as er
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_time_interval
@@ -37,6 +38,27 @@ from .const import (
     CONF_SCAN_INTERVAL,
     DEVICE_SCAN_INTERVAL,
     MIN_SCAN_INTERVAL,
+    CONF_API_KEY,
+    BETTERCAP_API_URL,
+    CONF_ENABLE_NET_PROBE,
+    CONF_ENABLE_NET_SNIFF,
+    CONF_ENABLE_ARP_SPOOF,
+    CONF_ENABLE_TICKER,
+    CONF_ENABLE_NET_RECON,
+    CONF_ENABLE_ZEROGOD,
+    BETTERCAP_NET_PROBE_ON,
+    BETTERCAP_NET_PROBE_OFF,
+    BETTERCAP_NET_SNIFF_ON,
+    BETTERCAP_NET_SNIFF_OFF,
+    BETTERCAP_ARP_SPOOF_ON,
+    BETTERCAP_ARP_SPOOF_OFF,
+    BETTERCAP_TICKER_ON,
+    BETTERCAP_TICKER_OFF,
+    BETTERCAP_NET_RECON_ON,
+    BETTERCAP_NET_RECON_OFF,
+    BETTERCAP_NET_SHOW_META_ON,
+    BETTERCAP_ZEROGOD_DISCOVERY_ON,
+    BETTERCAP_ZEROGOD_DISCOVERY_OFF,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -97,6 +119,9 @@ class NetworkDevice:
         self.cur_tx: str | None = None
         self.cur_rx: str | None = None
         self.connection_time: str | None = None
+        self.first_seen: str | None = None
+        self.last_seen: str | None = None
+        self.is_wireless: bool = False
         self.last_update: datetime | None = None
         self.first_offline: datetime | None = None
 
@@ -112,11 +137,11 @@ class NetworkDevice:
 
     def update_from_data(self, data: dict[str, Any]):
         """Update device data from fetched data."""
-        name = data.get("name") or data.get("nickName")
+        name = data.get("name") or data.get("nickName") or data.get("hostname")
         if name and name != self.name:
             self.name = name
 
-        ip = data.get("ip")
+        ip = data.get("ip") or data.get("ipv4")
         if ip and ip != self.ip:
             self.ip = ip
 
@@ -128,7 +153,7 @@ class NetworkDevice:
         if vendor_class and vendor_class != self.vendor_class:
             self.vendor_class = vendor_class
 
-        type_ = data.get("type")
+        type_ = data.get("type") or data.get("device_type")
         if type_ and type_ != self.type:
             self.type = type_
 
@@ -160,15 +185,27 @@ class NetworkDevice:
         if cur_rx and cur_rx != self.cur_rx:
             self.cur_rx = cur_rx
 
-        connection_time = data.get("wlConnectTime")
+        connection_time = data.get("wlConnectTime") or data.get("connection_time")
         if connection_time and connection_time != self.connection_time:
             self.connection_time = connection_time
+            
+        first_seen = data.get("first_seen")
+        if first_seen and first_seen != self.first_seen:
+            self.first_seen = first_seen
+            
+        last_seen = data.get("last_seen")
+        if last_seen and last_seen != self.last_seen:
+            self.last_seen = last_seen
+            
+        is_wireless = data.get("is_wireless", False)
+        if is_wireless is not None and is_wireless != self.is_wireless:
+            self.is_wireless = is_wireless
 
         self.last_update = dt_util.now()
 
 
 class NetworkDeviceScanner:
-    """Scanner for network devices using router data."""
+    """Scanner for network devices using Bettercap API."""
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         """Initialize the scanner."""
@@ -180,15 +217,49 @@ class NetworkDeviceScanner:
         )
         self._devices: dict[str, NetworkDevice] = {}
         self._scan_lock = asyncio.Lock()
-        self._ssh_client: paramiko.SSHClient | None = None
+        self._session = async_get_clientsession(hass)
+        self._api_url = BETTERCAP_API_URL.format(
+            host=self._config[CONF_HOST], 
+            port=self._config[CONF_PORT]
+        )
+        self._auth = aiohttp.BasicAuth(
+            self._config[CONF_USERNAME], 
+            self._config[CONF_PASSWORD]
+        )
+        self._headers = {"X-API-KEY": self._config.get(CONF_API_KEY, "")} if CONF_API_KEY in self._config else {}
         self._unsub_interval_scan = None
         self._finished_first_scan = False
         self._known_mac_addresses: dict[str, str] = {}
 
     async def async_setup(self) -> bool:
         """Set up the scanner and start periodic scanning."""
-        if not await self._async_connect_ssh():
+        # Test connection to Bettercap
+        try:
+            # First try to access the session endpoint
+            async with self._session.get(
+                f"{self._api_url}/session", 
+                auth=self._auth,
+                headers=self._headers,
+                timeout=10
+            ) as response:
+                if response.status != 200:
+                    _LOGGER.error("Failed to connect to Bettercap session API: %s", response.status)
+                    # Try the status endpoint as fallback
+                    async with self._session.get(
+                        f"{self._api_url}/", 
+                        auth=self._auth,
+                        headers=self._headers,
+                        timeout=10
+                    ) as status_response:
+                        if status_response.status != 200:
+                            _LOGGER.error("Failed to connect to Bettercap API: %s", status_response.status)
+                            return False
+        except aiohttp.ClientError as err:
+            _LOGGER.error("Error connecting to Bettercap: %s", err)
             return False
+            
+        # Enable the appropriate modules based on configuration
+        await self._enable_modules()
 
         if not aiooui.is_loaded():
             await aiooui.async_load()
@@ -219,58 +290,205 @@ class NetworkDeviceScanner:
             self._scan_interval,
         )
 
+    async def _enable_modules(self) -> None:
+        """Enable the appropriate Bettercap modules based on configuration."""
+        # Define which modules to enable based on config
+        modules_to_enable = []
+        
+        if self._config.get(CONF_ENABLE_NET_PROBE, True):
+            modules_to_enable.append(BETTERCAP_NET_PROBE_ON)
+        
+        if self._config.get(CONF_ENABLE_NET_SNIFF, False):
+            modules_to_enable.append(BETTERCAP_NET_SNIFF_ON)
+            
+        if self._config.get(CONF_ENABLE_ARP_SPOOF, False):
+            modules_to_enable.append(BETTERCAP_ARP_SPOOF_ON)
+            
+        if self._config.get(CONF_ENABLE_TICKER, False):
+            modules_to_enable.append(BETTERCAP_TICKER_ON)
+            
+        if self._config.get(CONF_ENABLE_NET_RECON, False):
+            modules_to_enable.append(BETTERCAP_NET_RECON_ON)
+            modules_to_enable.append(BETTERCAP_NET_SHOW_META_ON)
+            
+        if self._config.get(CONF_ENABLE_ZEROGOD, False):
+            modules_to_enable.append(BETTERCAP_ZEROGOD_DISCOVERY_ON)
+        
+        # Enable each module
+        for cmd in modules_to_enable:
+            try:
+                _LOGGER.debug("Sending Bettercap command: %s", cmd)
+                cmd_data = {"cmd": cmd}
+                async with self._session.post(
+                    f"{self._api_url}/session",
+                    auth=self._auth,
+                    headers=self._headers,
+                    json=cmd_data,
+                    timeout=10
+                ) as response:
+                    if response.status not in (200, 204):
+                        _LOGGER.warning("Failed to execute command %s: %s", cmd, response.status)
+                    else:
+                        _LOGGER.info("Successfully executed command: %s", cmd)
+            except aiohttp.ClientError as err:
+                _LOGGER.warning("Error executing command %s: %s", cmd, err)
+
     async def async_shutdown(self) -> None:
         """Stop the scanner and cleanup."""
         if self._unsub_interval_scan:
             self._unsub_interval_scan()
             self._unsub_interval_scan = None
-        if self._ssh_client:
-            await self._hass.async_add_executor_job(self._ssh_client.close)
-            self._ssh_client = None
-
-    async def _async_connect_ssh(self) -> bool:
-        """Establish SSH connection."""
-        self._ssh_client = paramiko.SSHClient()
-        self._ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        try:
-            await self._hass.async_add_executor_job(
-                self._ssh_client.connect,
-                self._config[CONF_HOST],
-                self._config[CONF_PORT],
-                self._config[CONF_USERNAME],
-                self._config[CONF_PASSWORD],
-            )
-            return True
-        except paramiko.AuthenticationException:
-            _LOGGER.error(
-                "SSH Authentication failed for %s@%s",
-                self._config[CONF_USERNAME],
-                self._config[CONF_HOST],
-            )
-            return False
-        except Exception as e:
-            _LOGGER.error(
-                "Error connecting to %s via SSH: %s", self._config[CONF_HOST], e
-            )
-            return False
+            
+        # Disable modules when shutting down
+        modules_to_disable = []
+        
+        if self._config.get(CONF_ENABLE_NET_PROBE, True):
+            modules_to_disable.append(BETTERCAP_NET_PROBE_OFF)
+        
+        if self._config.get(CONF_ENABLE_NET_SNIFF, False):
+            modules_to_disable.append(BETTERCAP_NET_SNIFF_OFF)
+            
+        if self._config.get(CONF_ENABLE_ARP_SPOOF, False):
+            modules_to_disable.append(BETTERCAP_ARP_SPOOF_OFF)
+            
+        if self._config.get(CONF_ENABLE_TICKER, False):
+            modules_to_disable.append(BETTERCAP_TICKER_OFF)
+            
+        if self._config.get(CONF_ENABLE_NET_RECON, False):
+            modules_to_disable.append(BETTERCAP_NET_RECON_OFF)
+            
+        if self._config.get(CONF_ENABLE_ZEROGOD, False):
+            modules_to_disable.append(BETTERCAP_ZEROGOD_DISCOVERY_OFF)
+        
+        # Disable each module
+        for cmd in modules_to_disable:
+            try:
+                cmd_data = {"cmd": cmd}
+                async with self._session.post(
+                    f"{self._api_url}/session",
+                    auth=self._auth,
+                    headers=self._headers,
+                    json=cmd_data,
+                    timeout=10
+                ) as response:
+                    if response.status not in (200, 204):
+                        _LOGGER.warning("Failed to execute command %s: %s", cmd, response.status)
+            except aiohttp.ClientError as err:
+                _LOGGER.warning("Error executing command %s: %s", cmd, err)
 
     async def _async_fetch_device_data(self) -> dict[str, Any] | None:
-        """Fetch device data from the router via SSH."""
-        if self._ssh_client is None:
-            if not await self._async_connect_ssh():  # Re-establish connection if lost
-                return None
-        if self._ssh_client is None:
-            _LOGGER.error("SSH Client is not available after connection attempt")
-            return None
-
+        """Fetch device data from Bettercap API."""
         try:
-            device_data = await self._hass.async_add_executor_job(
-                get_device_data, self._ssh_client
-            )
-            return device_data
-        except Exception as e:
-            _LOGGER.error("Error fetching device data: %s", e)
+            # Get the full session data which includes all devices
+            devices = {}
+            async with self._session.get(
+                f"{self._api_url}/session", 
+                auth=self._auth,
+                headers=self._headers,
+                timeout=10
+            ) as response:
+                if response.status == 200:
+                    session_data = await response.json()
+                    
+                    # Process LAN hosts
+                    if "lan" in session_data and "hosts" in session_data["lan"]:
+                        for host in session_data["lan"]["hosts"]:
+                            mac = host.get("mac", "").lower()
+                            if mac and mac != "--" and mac != "-":
+                                # Get metadata
+                                meta = host.get("meta", {})
+                                if isinstance(meta, dict) and "values" in meta:
+                                    meta = meta.get("values", {})
+                                
+                                # Determine if device is wireless
+                                is_wireless = False
+                                if "wireless" in meta or "wifi" in meta:
+                                    is_wireless = True
+                                
+                                # Extract traffic data if available
+                                traffic_data = {}
+                                if "packets" in session_data and "Traffic" in session_data["packets"]:
+                                    ip = host.get("ipv4")
+                                    if ip and ip in session_data["packets"]["Traffic"]:
+                                        traffic_data = session_data["packets"]["Traffic"][ip]
+                                
+                                # Extract signal strength if available
+                                rssi = None
+                                if "rssi" in meta:
+                                    rssi = str(meta.get("rssi"))
+                                
+                                # Determine frequency band if available
+                                is_2g = False
+                                is_5g = False
+                                if "frequency" in meta:
+                                    freq = meta.get("frequency", 0)
+                                    if isinstance(freq, (int, float)):
+                                        is_2g = freq < 5000
+                                        is_5g = freq >= 5000
+                                
+                                devices[mac] = {
+                                    "name": host.get("hostname", ""),
+                                    "ip": host.get("ipv4", ""),
+                                    "vendor": host.get("vendor", ""),
+                                    "vendorclass": host.get("vendor", ""),
+                                    "online": True,
+                                    "is_wireless": is_wireless,
+                                    "rssi": rssi,
+                                    "last_seen": host.get("last_seen", ""),
+                                    "first_seen": host.get("first_seen", ""),
+                                    "2G": is_2g,
+                                    "5G": is_5g,
+                                    "curTx": str(traffic_data.get("Sent", 0)) if traffic_data else None,
+                                    "curRx": str(traffic_data.get("Received", 0)) if traffic_data else None,
+                                    "wlConnectTime": host.get("first_seen", ""),
+                                    "meta": meta
+                                }
+            
+            # If no devices found in session data, try the dedicated LAN endpoint
+            if not devices:
+                await self._fetch_lan_devices(devices)
+            
+            return devices
+            
+        except aiohttp.ClientError as err:
+            _LOGGER.error("Error fetching device data from Bettercap: %s", err)
             return None
+        except Exception as e:
+            _LOGGER.error("Unexpected error fetching device data: %s", e)
+            return None
+    
+    async def _fetch_lan_devices(self, devices: dict) -> None:
+        """Fetch LAN devices from dedicated endpoint."""
+        try:
+            # Try the /session/lan endpoint
+            async with self._session.get(
+                f"{self._api_url}/session/lan", 
+                auth=self._auth,
+                headers=self._headers,
+                timeout=10
+            ) as response:
+                if response.status == 200:
+                    lan_data = await response.json()
+                    for host in lan_data.get("hosts", []):
+                        mac = host.get("mac", "").lower()
+                        if mac and mac != "--" and mac != "-":
+                            meta = host.get("meta", {})
+                            if isinstance(meta, dict) and "values" in meta:
+                                meta = meta.get("values", {})
+                                
+                            devices[mac] = {
+                                "name": host.get("hostname", ""),
+                                "ip": host.get("ipv4", ""),
+                                "vendor": host.get("vendor", ""),
+                                "vendorclass": host.get("vendor", ""),
+                                "online": True,
+                                "is_wireless": False,
+                                "last_seen": host.get("last_seen", ""),
+                                "first_seen": host.get("first_seen", ""),
+                                "meta": meta
+                            }
+        except aiohttp.ClientError as err:
+            _LOGGER.error("Error fetching LAN devices: %s", err)
 
     async def _async_scan_devices(self, *_):
         """Scan for devices and update device trackers."""
@@ -327,9 +545,11 @@ class NetworkDeviceScanner:
                 device.update_from_data(raw_device_data)
 
             current_devices[formatted_mac] = device
-            async_dispatcher_send(
-                self._hass, signal_device_update(formatted_mac), device.online
-            )  # Signal device update
+            # Make sure the device exists in _devices before sending update
+            if formatted_mac in self._devices:
+                async_dispatcher_send(
+                    self._hass, signal_device_update(formatted_mac), device.online
+                )  # Signal device update
 
         await self._async_process_device_offline(current_devices, now)
 
@@ -366,9 +586,11 @@ class NetworkDeviceScanner:
                         < now
                     ):  # Consider offline after 3 missed scans (adjust as needed)
                         device.online = False
-                        async_dispatcher_send(
-                            self._hass, signal_device_update(mac_address), False
-                        )  # Signal offline
+                        # Make sure the device exists in _devices before sending update
+                        if mac_address in self._devices:
+                            async_dispatcher_send(
+                                self._hass, signal_device_update(mac_address), False
+                            )  # Signal offline
                 elif (
                     not device.online
                     and device.first_offline
@@ -384,111 +606,3 @@ class NetworkDeviceScanner:
             self._devices.pop(mac_address)  # Remove devices offline for extended period
 
 
-def get_device_data(ssh_client: paramiko.SSHClient) -> dict[str, Any] | None:
-    """
-    Retrieves and parses device data from the router using SSH, including data from /tmp/nmp_cache.js.
-
-    Args:
-        ssh_client: An established paramiko SSHClient object.
-
-    Returns:
-        A dictionary containing device information, or None if an error occurs.
-    """
-    try:
-        # Read and parse /jffs/nmp_cl_json.js
-        _, stdout, stderr = ssh_client.exec_command("cat /jffs/nmp_cl_json.js")
-        cl_json_str = stdout.read().decode()
-        if stderr.read():
-            _LOGGER.warning(
-                "Error reading /jffs/nmp_cl_json.js: %s", stderr.read().decode()
-            )
-            return None
-
-        cl_json = json.loads(cl_json_str)
-
-        # Read and parse /jffs/nmp_vc_json.js
-        _, stdout, stderr = ssh_client.exec_command("cat /jffs/nmp_vc_json.js")
-        vc_json_str = stdout.read().decode()
-        if stderr.read():
-            _LOGGER.warning(
-                "Error reading /jffs/nmp_vc_json.js: %s", stderr.read().decode()
-            )
-            return None
-        vc_json = json.loads(vc_json_str) if vc_json_str else {}
-
-        # Read and parse /tmp/allwclientlist.json
-        _, stdout, stderr = ssh_client.exec_command("cat /tmp/allwclientlist.json")
-        allw_json_str = stdout.read().decode()
-        if stderr.read():
-            _LOGGER.warning(
-                "Error reading /tmp/allwclientlist.json: %s", stderr.read().decode()
-            )
-            return None
-
-        allw_json = json.loads(allw_json_str) if allw_json_str else {}
-
-        # Read and parse /tmp/nmp_cache.js
-        _, stdout, stderr = ssh_client.exec_command("cat /tmp/nmp_cache.js")
-        cache_json_str = stdout.read().decode()
-        if stderr.read():
-            _LOGGER.warning(
-                "Error reading /tmp/nmp_cache.js: %s", stderr.read().decode()
-            )
-            return None
-
-        cache_json = json.loads(cache_json_str) if cache_json_str else {}
-
-        # Combine data from all files
-        devices = {}
-        for mac, data in cl_json.items():
-            data["online"] = data["online"] == "1"  # Convert to bool
-            data["is_wireless"] = data["is_wireless"] == "1"  # Convert to bool
-            devices[mac] = data
-            devices[mac]["2G"] = False
-            devices[mac]["5G"] = False
-
-            # Append vendorclass from vc_json to existing vendorclass unless it's identical
-            if mac in vc_json and devices[mac]["vendorclass"] != vc_json[mac].get(
-                "vendorclass"
-            ):
-                devices[mac]["vendorclass"] += f", {vc_json[mac].get('vendorclass')}"
-
-        # Update online status and band info from allwclientlist.json
-        for interface, bands in allw_json.items():
-            for band, macs in bands.items():
-                for mac, _ in macs.items():
-                    if mac in devices:
-                        if band == "2G":
-                            devices[mac]["2G"] = True
-                        elif band == "5G":
-                            devices[mac]["5G"] = True
-
-        # Update data from nmp_cache.js
-        for mac, data in cache_json.items():
-            if mac != "maclist" and mac != "ClientAPILevel":
-                if mac not in devices:
-                    devices[mac] = {}
-
-                # Check if data is a dictionary before updating
-                if isinstance(data, dict):
-                    devices[mac].update(data)
-                else:
-                    _LOGGER.warning(
-                        "Data for MAC %s in nmp_cache.js is not a dictionary. Skipping update for this device",
-                        mac,
-                    )
-                    continue
-
-                # Ensure 'online' key exists after update from cache
-                if "online" not in devices[mac]:
-                    devices[mac]["online"] = False
-
-                # Check if the device is online based on nmp_cache.js
-                if "isOnline" in data and data["isOnline"] == "1":
-                    devices[mac]["online"] = True
-
-        return devices
-
-    except Exception as e:
-        _LOGGER.error("Error processing device data: %s", e)
-        return None
