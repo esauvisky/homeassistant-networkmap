@@ -229,6 +229,8 @@ class NetworkDeviceScanner:
         self._unsub_interval_scan = None
         self._finished_first_scan = False
         self._known_mac_addresses: dict[str, str] = {}
+        self._existing_mac_entities: dict[str, dict] = {}
+        self._existing_hostname_entities: dict[str, dict] = {}
 
     async def async_setup(self) -> bool:
         """Set up the scanner and start periodic scanning."""
@@ -263,13 +265,75 @@ class NetworkDeviceScanner:
         if not aiooui.is_loaded():
             await aiooui.async_load()
 
+        # Get entity registry to find existing device_tracker entities
         registry = er.async_get(self._hass)
+
+        # Get entities for this config entry
         self._known_mac_addresses = {
             entry.unique_id: entry.original_name
             for entry in registry.entities.get_entries_for_config_entry_id(
                 self._entry.entry_id
             )
         }
+
+        # Find all device_tracker entities in the system to check for MAC address and hostname matches
+        self._existing_mac_entities = {}
+        self._existing_hostname_entities = {}
+
+        # First pass: collect all device_tracker entities
+        all_device_trackers = {}
+        for entity_id, entity in registry.entities.items():
+            if entity.domain == "device_tracker":
+                all_device_trackers[entity_id] = {
+                    "entity_id": entity_id,
+                    "config_entry_id": entity.config_entry_id,
+                    "disabled": entity.disabled,
+                    "unique_id": entity.unique_id,
+                    "original_name": entity.original_name
+                }
+
+        # Second pass: check for MAC addresses in unique_ids and attributes
+        for entity_id, entity_data in all_device_trackers.items():
+            # Check if unique_id contains a MAC address
+            if entity_data["unique_id"] and ":" in entity_data["unique_id"]:
+                mac_parts = entity_data["unique_id"].split("_")
+                for part in mac_parts:
+                    if ":" in part and len(part) >= 17:  # MAC addresses are at least 17 chars with colons
+                        self._existing_mac_entities[format_mac(part)] = entity_data
+
+            # Store by hostname (entity ID without domain) for later matching
+            hostname = entity_id.split(".", 1)[1]
+            self._existing_hostname_entities[hostname.lower()] = entity_data
+
+            # Also store by original name if available
+            if entity_data["original_name"]:
+                self._existing_hostname_entities[entity_data["original_name"].lower()] = entity_data
+
+        # Third pass: check entity attributes for MAC addresses
+        for entity_id in all_device_trackers:
+            try:
+                state = self._hass.states.get(entity_id)
+                if state and state.attributes:
+                    # Check for mac_address attribute
+                    if "mac_address" in state.attributes:
+                        mac = format_mac(state.attributes["mac_address"])
+                        if mac:
+                            self._existing_mac_entities[mac] = all_device_trackers[entity_id]
+
+                    # Check for MAC in other common attribute names
+                    for attr_name in ["mac", "MAC", "hw_addr", "hardware_address"]:
+                        if attr_name in state.attributes:
+                            mac = format_mac(state.attributes[attr_name])
+                            if mac:
+                                self._existing_mac_entities[mac] = all_device_trackers[entity_id]
+
+                    # Store hostname from attributes for matching
+                    for attr_name in ["hostname", "host_name", "name"]:
+                        if attr_name in state.attributes and state.attributes[attr_name]:
+                            hostname = state.attributes[attr_name].lower()
+                            self._existing_hostname_entities[hostname] = all_device_trackers[entity_id]
+            except Exception as ex:
+                _LOGGER.warning("Error checking attributes for %s: %s", entity_id, ex)
 
         if self._hass.state == CoreState.running:
             await self._async_start_scanner()
@@ -507,6 +571,7 @@ class NetworkDeviceScanner:
         """Process fetched device data and update entities."""
         current_devices = {}
         now = dt_util.now()
+        registry = er.async_get(self._hass)
 
         for mac_address, raw_device_data in fetched_devices.items():
             formatted_mac = format_mac(mac_address)
@@ -514,6 +579,58 @@ class NetworkDeviceScanner:
                 _LOGGER.warning("Invalid MAC address found: %s", mac_address)
                 continue
 
+            # First check if this MAC is already tracked by another integration
+            existing_entity = self._existing_mac_entities.get(formatted_mac)
+            if existing_entity and existing_entity["config_entry_id"] != self._entry.entry_id:
+                # This MAC is tracked by another integration, update the entity registry
+                # to associate it with this integration instead
+                _LOGGER.info(
+                    "Found existing device_tracker entity %s for MAC %s, updating to use this integration",
+                    existing_entity["entity_id"], formatted_mac
+                )
+
+                # Only update the entity if it's not disabled
+                if not existing_entity["disabled"]:
+                    try:
+                        # Update the entity to use this integration
+                        registry.async_update_entity(
+                            entity_id=existing_entity["entity_id"],
+                            config_entry_id=self._entry.entry_id,
+                            # Keep the original unique_id to maintain entity history
+                            new_unique_id=f"{DOMAIN}_{formatted_mac}"
+                        )
+                        # Add to known MAC addresses
+                        self._known_mac_addresses[formatted_mac] = existing_entity["entity_id"].split(".", 1)[1]
+                    except Exception as ex:
+                        _LOGGER.error("Error updating entity registry for %s: %s", formatted_mac, ex)
+
+            # If no MAC match, check if hostname matches an existing entity
+            elif raw_device_data.get("name"):
+                hostname = raw_device_data["name"].lower()
+                existing_entity = self._existing_hostname_entities.get(hostname)
+
+                if existing_entity and existing_entity["config_entry_id"] != self._entry.entry_id:
+                    _LOGGER.info(
+                        "Found existing device_tracker entity %s with matching hostname %s, updating to use this integration",
+                        existing_entity["entity_id"], hostname
+                    )
+
+                    # Only update the entity if it's not disabled
+                    if not existing_entity["disabled"]:
+                        try:
+                            # Update the entity to use this integration
+                            registry.async_update_entity(
+                                entity_id=existing_entity["entity_id"],
+                                config_entry_id=self._entry.entry_id,
+                                # Use the new MAC address with our domain prefix
+                                new_unique_id=f"{DOMAIN}_{formatted_mac}"
+                            )
+                            # Add to known MAC addresses
+                            self._known_mac_addresses[formatted_mac] = existing_entity["entity_id"].split(".", 1)[1]
+                        except Exception as ex:
+                            _LOGGER.error("Error updating entity registry for hostname %s: %s", hostname, ex)
+
+            # Check if this device is managed by this config entry
             if (
                 self._entry.entry_id
                 != self._known_mac_addresses.get(
