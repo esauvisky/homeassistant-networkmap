@@ -358,7 +358,7 @@ class NetworkDeviceScanner:
             self._async_scan_devices,
             self._scan_interval,
         )
-
+        
         # Also start a periodic reverification of offline devices
         self._unsub_reverify = async_track_time_interval(
             self._hass,
@@ -418,7 +418,7 @@ class NetworkDeviceScanner:
         if hasattr(self, '_unsub_reverify') and self._unsub_reverify:
             self._unsub_reverify()
             self._unsub_reverify = None
-
+            
         # Disable modules when shutting down
         modules_to_disable = []
         
@@ -591,7 +591,7 @@ class NetworkDeviceScanner:
             return
 
         _LOGGER.debug("Actively verifying connectivity for %s (%s)", device.name, device.ip)
-
+        
         # Try different verification methods
         verification_methods = [
             # Method 1: Targeted net.probe
@@ -601,7 +601,7 @@ class NetworkDeviceScanner:
             # Method 3: ICMP ping
             {"cmd": BETTERCAP_PING_TARGET.format(target=device.ip)}
         ]
-
+        
         for method in verification_methods:
             try:
                 # Send the verification command
@@ -615,7 +615,7 @@ class NetworkDeviceScanner:
                     if response.status in (200, 204):
                         # Wait a moment for the command to take effect
                         await asyncio.sleep(VERIFICATION_DELAY)
-
+                        
                         # Check if the device responded by fetching updated device data
                         device_data = await self._async_fetch_device_data()
                         if device_data and device.mac_address in device_data:
@@ -630,18 +630,18 @@ class NetworkDeviceScanner:
                             device.update_from_data(device_data[device.mac_address])
                             # Signal device update
                             async_dispatcher_send(
-                                self._hass,
-                                signal_device_update(device.mac_address),
+                                self._hass, 
+                                signal_device_update(device.mac_address), 
                                 True
                             )
                             return  # Successfully verified, no need to try other methods
             except Exception as ex:
                 _LOGGER.warning("Error during connectivity verification for %s: %s", device.name, ex)
-
+        
         # If we get here, all verification methods failed
-        _LOGGER.debug("Device %s failed verification attempt %d",
+        _LOGGER.debug("Device %s failed verification attempt %d", 
                      device.name, device.verification_attempts)
-
+    
     async def _async_scheduled_reverification(self, *_):
         """Periodically try to rediscover offline devices."""
         _LOGGER.debug("Running scheduled reverification of offline devices")
@@ -650,7 +650,7 @@ class NetworkDeviceScanner:
                 # Try to rediscover the device
                 _LOGGER.debug("Attempting to rediscover offline device: %s", device.name)
                 await self._verify_device_connectivity(device)
-
+    
     async def _async_process_device_data(self, fetched_devices: dict[str, Any]) -> None:
         """Process fetched device data and update entities."""
         current_devices = {}
@@ -758,32 +758,32 @@ class NetworkDeviceScanner:
 
     def _generate_better_name(self, device: NetworkDevice) -> tuple[str, bool]:
         """Generate a better name for a device based on available information.
-
+        
         Returns:
             tuple: (better_name, is_significant_improvement)
         """
         current_name = device.name or f"Device {device.mac_address[-4:]}"
-
+        
         # Check if we have a hostname
         if device.name and len(device.name) > 1 and not device.name.startswith("Device "):
             # We have a good hostname
-
+            
             # If we also have vendor information, include it
             if device.vendor and len(device.vendor) > 1:
                 better_name = f"{device.name} ({device.vendor})"
                 return better_name, True
-
+            
             # Just the hostname is still good
             return device.name, True
-
+            
         # If we have vendor but no good hostname
         if device.vendor and len(device.vendor) > 1:
             better_name = f"{device.vendor} {device.mac_address[-4:]}"
             return better_name, True
-
+            
         # No significant improvement possible
         return current_name, False
-
+        
     async def _async_mark_missing_devices_as_not_home(self):
         """Mark devices not found in the first scan as not_home."""
         now = dt_util.now()
@@ -803,48 +803,48 @@ class NetworkDeviceScanner:
     async def _try_rename_existing_entity(self, mac_address: str, device_data: dict[str, Any]) -> None:
         """Try to rename an existing entity if better information is available."""
         registry = er.async_get(self._hass)
-
+        
         # Check if this MAC address has an existing entity
         existing_entity = self._existing_mac_entities.get(mac_address)
         if not existing_entity:
             return
-
+            
         # Create a temporary device object to use our naming logic
         temp_device = NetworkDevice(mac_address)
         temp_device.update_from_data(device_data)
-
+        
         # Generate a better name
         better_name, is_significant = self._generate_better_name(temp_device)
         if not is_significant:
             return
-
+            
         entity_id = existing_entity["entity_id"]
         _LOGGER.debug(
-            "Found better name '%s' for existing entity %s (MAC: %s)",
+            "Found better name '%s' for existing entity %s (MAC: %s)", 
             better_name, entity_id, mac_address
         )
-
+        
         try:
             # Get the current entity state
             state = self._hass.states.get(entity_id)
             if not state:
                 return
-
+                
             current_name = state.name
-
+            
             # Check if the current name is already good
             if current_name and len(current_name) > 1 and ":" not in current_name and "-" not in current_name:
                 # Current name seems good, only replace if we have a hostname and vendor
                 if not (temp_device.name and temp_device.vendor):
                     return
-
+            
             # Update friendly name if enabled
             if self._auto_rename_friendly:
                 _LOGGER.info(
-                    "Renaming entity %s friendly name from '%s' to '%s'",
+                    "Renaming entity %s friendly name from '%s' to '%s'", 
                     entity_id, current_name, better_name
                 )
-
+                
                 # Update the friendly name via service call
                 await self._hass.services.async_call(
                     "homeassistant", "update_entity_attributes",
@@ -854,36 +854,36 @@ class NetworkDeviceScanner:
                     },
                     blocking=True
                 )
-
+            
             # Update entity ID if enabled
             if self._auto_rename_entity and temp_device.name:
                 # Generate a valid entity ID from the device name
                 domain = entity_id.split(".", 1)[0]
                 new_entity_id = f"{domain}.{temp_device.name.lower().replace(' ', '_')}"
-
+                
                 # Check if this entity ID already exists
                 if new_entity_id != entity_id and not self._hass.states.get(new_entity_id):
                     _LOGGER.info(
-                        "Renaming entity ID from %s to %s",
+                        "Renaming entity ID from %s to %s", 
                         entity_id, new_entity_id
                     )
-
+                    
                     # Update the entity ID in the registry
                     registry.async_update_entity(
                         entity_id=entity_id,
                         new_entity_id=new_entity_id
                     )
-
+                    
                     # Update our tracking dictionaries
                     self._existing_mac_entities[mac_address]["entity_id"] = new_entity_id
-
+                    
                     # If this entity is in our known MAC addresses, update that too
                     if mac_address in self._known_mac_addresses:
                         self._known_mac_addresses[mac_address] = new_entity_id.split(".", 1)[1]
-
+        
         except Exception as ex:
             _LOGGER.error("Error renaming entity %s: %s", entity_id, ex)
-
+    
     async def _async_process_device_offline(
         self, current_devices: dict[str, NetworkDevice], now: datetime
     ):
@@ -907,7 +907,7 @@ class NetworkDeviceScanner:
                             max_verification_attempts = VERIFICATION_ATTEMPTS * 2
                         else:
                             max_verification_attempts = VERIFICATION_ATTEMPTS
-
+                            
                         # Time to actively verify if the device is truly offline
                         if device.verification_attempts < max_verification_attempts:
                             # Increment verification counter
@@ -922,12 +922,12 @@ class NetworkDeviceScanner:
                             # Update reliability metrics
                             device.offline_frequency += 1
                             device.reliability_score = max(0, device.reliability_score - 5)
-
+                            
                             _LOGGER.debug(
                                 "Device %s (%s) marked offline after %d verification attempts",
                                 device.name, device.mac_address, device.verification_attempts
                             )
-
+                            
                             # Make sure the device exists in _devices before sending update
                             if mac_address in self._devices:
                                 async_dispatcher_send(

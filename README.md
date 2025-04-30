@@ -2,34 +2,31 @@
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Default-orange.svg)](https://github.com/custom-components/hacs)
 
-Home Assistant custom component to track devices on your network by fetching data from your **ASUS router** via SSH.
+Home Assistant custom component to track devices on your network by fetching data from **Bettercap** via its REST API.
 
 ## Important Notes
 
-*   **This component is specifically designed for ASUS routers.** It might work on other routers with a similar firmware (like some ASUSWRT Merlin-based) that store device information in the same file paths, but compatibility is not guaranteed.
-*   **You must enable SSH access on your router and allow login via username/password.** This is required for the component to connect and retrieve device data. See instructions below.
+* **This component uses Bettercap for network scanning.** Bettercap is a powerful network tool that can discover devices on your network.
+* **You must have Bettercap running and accessible from Home Assistant.** The component connects to Bettercap's API to retrieve device data.
 
 ## Features
 
-*   Creates `device_tracker` entities in Home Assistant for devices connected to your ASUS router.
-*   Fetches device information via a secure SSH connection.
-*   Provides detailed device information, including:
-    *   MAC Address (used as unique ID)
-    *   IP Address
-    *   Hostname (Name)
-    *   Vendor and Vendor Class
-    *   Device Type and OS Type
-    *   Online Status
-    *   2.4 GHz or 5 GHz connection status
-    *   RSSI (signal strength)
-    *   Current TX/RX rates
-    *   Connection Time
-    *   Last Update Timestamp
-*   Automatically discovers new devices as they connect to your network.
-*   Smart device detection: Only adds devices that are online and have sufficient information (name and IP).
-*   Integrates with the Home Assistant entity registry.
-*   Configurable scan interval.
-*   Robust error handling.
+* Creates `device_tracker` entities in Home Assistant for devices discovered on your network.
+* Fetches device information via Bettercap's REST API.
+* Provides detailed device information as entity attributes, including:
+    * MAC Address (used as unique ID)
+    * IP Address
+    * Hostname (Name)
+    * Vendor information
+    * Online Status
+    * Network traffic statistics
+    * Signal strength (for wireless devices)
+    * First and last seen timestamps
+* Automatically discovers new devices as they connect to your network.
+* Smart device detection: Only adds devices that are online and have sufficient information.
+* Configurable scan types (probe, sniff, ARP spoofing).
+* Configurable scan interval.
+* Robust error handling.
 
 ## Installation
 
@@ -48,45 +45,96 @@ Home Assistant custom component to track devices on your network by fetching dat
 1. Copy the `networkmap` folder from this repository to your `custom_components` folder in your Home Assistant configuration directory.
 2. Restart Home Assistant.
 
+## Setting up Bettercap
+
+### Docker (Recommended)
+
+The easiest way to run Bettercap is using Docker:
+
+```yaml
+version: '3'
+
+services:
+  bettercap:
+    image: bettercap/bettercap:latest
+    container_name: bettercap
+    network_mode: host
+    privileged: true
+    restart: unless-stopped
+    command: >
+      -eval "set api.rest.address 0.0.0.0; 
+             set api.rest.port 8081; 
+             set api.rest.username user; 
+             set api.rest.password your_secure_password; 
+             api.rest on"
+```
+
+### Direct Installation
+
+1. Install Bettercap on a Linux system (see [Bettercap installation guide](https://www.bettercap.org/installation/)).
+2. Start Bettercap with API access:
+   ```
+   sudo bettercap -eval "set api.rest.address 0.0.0.0; set api.rest.port 8081; set api.rest.username user; set api.rest.password your_secure_password; api.rest on"
+   ```
+
 ## Configuration
 
-1. **Enable SSH on your ASUS router:**
-    *   Log in to your router's web interface (usually `http://router.asus.com`).
-    *   Go to **Administration** -> **System**.
-    *   Set **Enable SSH** to `LAN Only` or `LAN + WAN` (less secure).
-    *   Set **Allow SSH password login** to `Yes`.
-    *   Click **Apply**.
-    *   **Note:** The exact steps may vary slightly depending on your router model and firmware version.
+1. **Configure the integration in Home Assistant:**
+    * Go to **Settings** -> **Devices & Services** -> **Integrations**.
+    * Click **+ Add Integration**.
+    * Search for "Network Map" and select it.
+    * Enter the following information:
+        * **Host:** The IP address of your Bettercap server.
+        * **Port:** The API port (default: 8081).
+        * **Username:** Bettercap API username.
+        * **Password:** Bettercap API password.
+        * **API Key:** Optional API token.
+        * **Enable network probing:** Discovers devices on your network.
+        * **Enable network sniffing:** Captures network traffic for more device info.
+        * **Enable ARP spoofing:** Man-in-the-middle technique (use with caution).
+        * **Enable ticker:** Periodic status updates in Bettercap.
+    * Click **Submit**.
 
-2. **Configure the integration in Home Assistant:**
-    *   Go to **Settings** -> **Devices & Services** -> **Integrations**.
-    *   Click **+ Add Integration**.
-    *   Search for "Network Map" and select it.
-    *   Enter the following information:
-        *   **Host:** The IP address of your router (e.g., 192.168.1.1).
-        *   **Port:** The SSH port (default: 22).
-        *   **Username:** Your router's SSH username (default: `admin`).
-        *   **Password:** Your router's SSH password.
-    *   Click **Submit**.
-3. **(Optional) Configure the scan interval:**
-    *   After adding the integration, click on **Options** in the Network Map integration card.
-    *   Adjust the **Scan interval (seconds)** as desired (default: 60, minimum: 10). A shorter interval provides more up-to-date device status but consumes more resources.
+2. **(Optional) Configure the scan interval:**
+    * After adding the integration, click on **Options** in the Network Map integration card.
+    * Adjust the **Scan interval (seconds)** as desired (default: 30, minimum: 10).
 
 ## Usage
 
-Once configured, the component will automatically create `device_tracker` entities for devices connected to your router. You can find these entities in the **Entities** list in Home Assistant.
+Once configured, the component will automatically create `device_tracker` entities for devices discovered on your network. You can find these entities in the **Entities** list in Home Assistant.
 
-**Note:** During the initial scan, the component will register all known MAC addresses in the entity registry, but will only create device tracker entities for devices that are currently online and have sufficient information (name and IP).
+These entities can be used in automations, such as:
+* Presence detection (home/away)
+* Notifications when specific devices connect or disconnect
+* Tracking guest devices on your network
 
 ## Troubleshooting
 
-*   **Error connecting to the router:**
-    *   Ensure that SSH is enabled on your router and that you are using the correct IP address, port, username, and password.
-    *   Check your router's firewall settings to make sure that SSH traffic is allowed.
-*   **No devices are discovered:**
-    *   Make sure that your router stores device information in the expected file paths (`/jffs/nmp_cl_json.js`, `/jffs/nmp_vc_json.js`, `/tmp/allwclientlist.json`, and `/tmp/nmp_cache.js`).
-    *   Verify that the files contain data. You might need to SSH into your router and manually check the contents of these files.
-    *   Check the Home Assistant logs for any error messages related to the `networkmap` component.
+* **Error connecting to Bettercap:**
+    * Ensure that Bettercap is running and that you are using the correct IP address, port, username, and password.
+    * Check that your firewall allows connections to the Bettercap API port.
+    * Verify Bettercap is running with proper permissions to scan the network.
+
+* **No devices are discovered:**
+    * Make sure network probing is enabled in the integration settings.
+    * Check that Bettercap has permission to scan your network.
+    * Some devices may go to sleep and not respond to network scans.
+    * Try reducing the scan interval for more frequent updates.
+
+* **For more detailed logs:**
+    * Add this to your configuration.yaml:
+      ```yaml
+      logger:
+        default: info
+        logs:
+          custom_components.networkmap: debug
+      ```
+
+## Security Considerations
+
+* Network scanning tools like Bettercap should be used responsibly and only on networks you own or have permission to scan.
+* ARP spoofing is a powerful technique that can disrupt network traffic. Only enable it if you understand the implications.
+* Always secure your Bettercap instance with strong credentials.
 
 ## Contributing
 
@@ -94,4 +142,4 @@ Contributions are welcome! Please feel free to submit pull requests or open issu
 
 ## Disclaimer
 
-This is a custom component and is not officially supported by Home Assistant or ASUS. Use it at your own risk.
+This is a custom component and is not officially supported by Home Assistant or Bettercap. Use it at your own risk.
