@@ -13,7 +13,9 @@
           "enable_arp_spoof": "Enable ARP spoofing (MITM, use with caution)",
           "enable_ticker": "Enable ticker (periodic status updates)",
           "enable_net_recon": "Enable network reconnaissance (ARP cache monitoring)",
-          "enable_zerogod": "Enable Zeroconf/mDNS discovery (finds Bonjour services)"
+          "enable_zerogod": "Enable Zeroconf/mDNS discovery (finds Bonjour services)",
+          "auto_rename_friendly": "Auto-rename friendly names when better info is available",
+          "auto_rename_entity": "Auto-rename entity IDs when better info is available (use with caution)"
         },
         "description": "Enter your Bettercap connection details."
       }

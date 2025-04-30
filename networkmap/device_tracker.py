@@ -82,6 +82,14 @@ class NetworkMapDeviceTrackerEntity(ScannerEntity):
     def name(self) -> str:
         """Return device name."""
         device = self._device
+        scanner = self._scanner
+
+        # Use the better name generator if available
+        if hasattr(scanner, "_generate_better_name"):
+            better_name, _ = scanner._generate_better_name(device)
+            return better_name
+
+        # Fallback to simple naming
         if device.name:
             return device.name
         return f"Device {self._mac_address[-4:]}"

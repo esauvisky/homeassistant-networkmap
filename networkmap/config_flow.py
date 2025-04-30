@@ -37,6 +37,8 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
         vol.Required(CONF_ENABLE_TICKER, default=DEFAULT_ENABLE_TICKER): bool,
         vol.Required(CONF_ENABLE_NET_RECON, default=DEFAULT_ENABLE_NET_RECON): bool,
         vol.Required(CONF_ENABLE_ZEROGOD, default=DEFAULT_ENABLE_ZEROGOD): bool,
+        vol.Required(CONF_AUTO_RENAME_FRIENDLY, default=DEFAULT_AUTO_RENAME_FRIENDLY): bool,
+        vol.Required(CONF_AUTO_RENAME_ENTITY, default=DEFAULT_AUTO_RENAME_ENTITY): bool,
     }
 )
 
