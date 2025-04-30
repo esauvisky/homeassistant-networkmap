@@ -113,7 +113,6 @@ class NetworkMapDeviceTrackerEntity(ScannerEntity):
         attributes = {
             "vendor": device.vendor,
             "vendor_class": device.vendor_class,
-            "last_update": device.last_update.isoformat(timespec="seconds") if device.last_update else None,
         }
         
         # Add optional attributes only if they have values
@@ -137,9 +136,6 @@ class NetworkMapDeviceTrackerEntity(ScannerEntity):
             
         if device.cur_rx:
             attributes["current_rx_rate"] = device.cur_rx
-            
-        if device.connection_time:
-            attributes["connection_time"] = device.connection_time
             
         if device.is_2g:
             attributes["is_2g"] = device.is_2g

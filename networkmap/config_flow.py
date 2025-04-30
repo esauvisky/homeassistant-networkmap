@@ -28,9 +28,9 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_HOST): str,
         vol.Required(CONF_PORT, default=DEFAULT_PORT): int,
-        vol.Required(CONF_USERNAME, default="user"): str,
-        vol.Required(CONF_PASSWORD): str,
-        vol.Required(CONF_API_KEY, default=""): str,
+        vol.Optional(CONF_USERNAME, default="user"): str,
+        vol.Optional(CONF_PASSWORD, default=""): str,
+        vol.Optional(CONF_API_KEY, default=""): str,
         vol.Required(CONF_ENABLE_NET_PROBE, default=DEFAULT_ENABLE_NET_PROBE): bool,
         vol.Required(CONF_ENABLE_NET_SNIFF, default=DEFAULT_ENABLE_NET_SNIFF): bool,
         vol.Required(CONF_ENABLE_ARP_SPOOF, default=DEFAULT_ENABLE_ARP_SPOOF): bool,

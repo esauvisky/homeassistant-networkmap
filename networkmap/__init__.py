@@ -118,11 +118,9 @@ class NetworkDevice:
         self.rssi: str | None = None
         self.cur_tx: str | None = None
         self.cur_rx: str | None = None
-        self.connection_time: str | None = None
         self.first_seen: str | None = None
         self.last_seen: str | None = None
         self.is_wireless: bool = False
-        self.last_update: datetime | None = None
         self.first_offline: datetime | None = None
 
     @property
@@ -185,10 +183,6 @@ class NetworkDevice:
         if cur_rx and cur_rx != self.cur_rx:
             self.cur_rx = cur_rx
 
-        connection_time = data.get("wlConnectTime") or data.get("connection_time")
-        if connection_time and connection_time != self.connection_time:
-            self.connection_time = connection_time
-            
         first_seen = data.get("first_seen")
         if first_seen and first_seen != self.first_seen:
             self.first_seen = first_seen
@@ -200,8 +194,6 @@ class NetworkDevice:
         is_wireless = data.get("is_wireless", False)
         if is_wireless is not None and is_wireless != self.is_wireless:
             self.is_wireless = is_wireless
-
-        self.last_update = dt_util.now()
 
 
 class NetworkDeviceScanner:
@@ -222,11 +214,18 @@ class NetworkDeviceScanner:
             host=self._config[CONF_HOST], 
             port=self._config[CONF_PORT]
         )
-        self._auth = aiohttp.BasicAuth(
-            self._config[CONF_USERNAME], 
-            self._config[CONF_PASSWORD]
-        )
-        self._headers = {"X-API-KEY": self._config.get(CONF_API_KEY, "")} if CONF_API_KEY in self._config else {}
+        # Set up authentication only if username and password are provided
+        self._auth = None
+        if self._config.get(CONF_USERNAME) and self._config.get(CONF_PASSWORD):
+            self._auth = aiohttp.BasicAuth(
+                self._config[CONF_USERNAME],
+                self._config[CONF_PASSWORD]
+            )
+
+        # Set up API key header only if API key is provided
+        self._headers = {}
+        if self._config.get(CONF_API_KEY):
+            self._headers = {"X-API-KEY": self._config[CONF_API_KEY]}
         self._unsub_interval_scan = None
         self._finished_first_scan = False
         self._known_mac_addresses: dict[str, str] = {}
@@ -440,7 +439,6 @@ class NetworkDeviceScanner:
                                     "5G": is_5g,
                                     "curTx": str(traffic_data.get("Sent", 0)) if traffic_data else None,
                                     "curRx": str(traffic_data.get("Received", 0)) if traffic_data else None,
-                                    "wlConnectTime": host.get("first_seen", ""),
                                     "meta": meta
                                 }
             
@@ -561,7 +559,6 @@ class NetworkDeviceScanner:
                 continue
             device = NetworkDevice(mac_address)
             device.name = original_name
-            device.last_update = now
             device.first_offline = now  # Mark first offline time
             self._devices[mac_address] = device
             async_dispatcher_send(
