@@ -122,6 +122,9 @@ class NetworkDevice:
         self.last_seen: str | None = None
         self.is_wireless: bool = False
         self.first_offline: datetime | None = None
+        self.verification_attempts: int = 0
+        self.reliability_score: int = 100  # Start with perfect score
+        self.offline_frequency: int = 0    # Track how often device goes offline
 
     @property
     def is_2g(self) -> bool:
@@ -207,6 +210,9 @@ class NetworkDeviceScanner:
         self._scan_interval = timedelta(
             seconds=entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
         )
+        # Get device naming options
+        self._auto_rename_friendly = self._config.get(CONF_AUTO_RENAME_FRIENDLY, DEFAULT_AUTO_RENAME_FRIENDLY)
+        self._auto_rename_entity = self._config.get(CONF_AUTO_RENAME_ENTITY, DEFAULT_AUTO_RENAME_ENTITY)
         self._devices: dict[str, NetworkDevice] = {}
         self._scan_lock = asyncio.Lock()
         self._session = async_get_clientsession(hass)
@@ -353,6 +359,13 @@ class NetworkDeviceScanner:
             self._scan_interval,
         )
 
+        # Also start a periodic reverification of offline devices
+        self._unsub_reverify = async_track_time_interval(
+            self._hass,
+            self._async_scheduled_reverification,
+            timedelta(minutes=15),  # Try to rediscover offline devices every 15 minutes
+        )
+
     async def _enable_modules(self) -> None:
         """Enable the appropriate Bettercap modules based on configuration."""
         # Define which modules to enable based on config
@@ -402,6 +415,10 @@ class NetworkDeviceScanner:
             self._unsub_interval_scan()
             self._unsub_interval_scan = None
             
+        if hasattr(self, '_unsub_reverify') and self._unsub_reverify:
+            self._unsub_reverify()
+            self._unsub_reverify = None
+
         # Disable modules when shutting down
         modules_to_disable = []
         
@@ -567,6 +584,73 @@ class NetworkDeviceScanner:
             self._finished_first_scan = True
             await self._async_mark_missing_devices_as_not_home()
 
+    async def _verify_device_connectivity(self, device: NetworkDevice) -> None:
+        """Actively verify if a device is still connected to the network."""
+        if not device.ip:
+            _LOGGER.debug("Cannot verify device %s: no IP address", device.mac_address)
+            return
+
+        _LOGGER.debug("Actively verifying connectivity for %s (%s)", device.name, device.ip)
+
+        # Try different verification methods
+        verification_methods = [
+            # Method 1: Targeted net.probe
+            {"cmd": BETTERCAP_NET_PROBE_TARGET.format(target=device.ip)},
+            # Method 2: ARP probe
+            {"cmd": BETTERCAP_ARP_PROBE_TARGET.format(target=device.ip)},
+            # Method 3: ICMP ping
+            {"cmd": BETTERCAP_PING_TARGET.format(target=device.ip)}
+        ]
+
+        for method in verification_methods:
+            try:
+                # Send the verification command
+                async with self._session.post(
+                    f"{self._api_url}/session",
+                    auth=self._auth,
+                    headers=self._headers,
+                    json=method,
+                    timeout=10
+                ) as response:
+                    if response.status in (200, 204):
+                        # Wait a moment for the command to take effect
+                        await asyncio.sleep(VERIFICATION_DELAY)
+
+                        # Check if the device responded by fetching updated device data
+                        device_data = await self._async_fetch_device_data()
+                        if device_data and device.mac_address in device_data:
+                            # Device responded to verification, mark as online
+                            _LOGGER.debug("Device %s verified as online", device.name)
+                            device.online = True
+                            device.first_offline = None
+                            device.verification_attempts = 0
+                            # Improve reliability score
+                            device.reliability_score = min(100, device.reliability_score + 2)
+                            # Update device data
+                            device.update_from_data(device_data[device.mac_address])
+                            # Signal device update
+                            async_dispatcher_send(
+                                self._hass,
+                                signal_device_update(device.mac_address),
+                                True
+                            )
+                            return  # Successfully verified, no need to try other methods
+            except Exception as ex:
+                _LOGGER.warning("Error during connectivity verification for %s: %s", device.name, ex)
+
+        # If we get here, all verification methods failed
+        _LOGGER.debug("Device %s failed verification attempt %d",
+                     device.name, device.verification_attempts)
+
+    async def _async_scheduled_reverification(self, *_):
+        """Periodically try to rediscover offline devices."""
+        _LOGGER.debug("Running scheduled reverification of offline devices")
+        for mac_address, device in self._devices.items():
+            if not device.online and device.ip:
+                # Try to rediscover the device
+                _LOGGER.debug("Attempting to rediscover offline device: %s", device.name)
+                await self._verify_device_connectivity(device)
+
     async def _async_process_device_data(self, fetched_devices: dict[str, Any]) -> None:
         """Process fetched device data and update entities."""
         current_devices = {}
@@ -637,6 +721,10 @@ class NetworkDeviceScanner:
                     formatted_mac, self._entry.entry_id
                 )  # Using entity registry to track ownership, fallback to entry_id for new entities.
             ):
+                # If auto-rename is enabled, we might still want to update the entity
+                # even if it's not managed by this config entry
+                if self._auto_rename_friendly or self._auto_rename_entity:
+                    await self._try_rename_existing_entity(formatted_mac, raw_device_data)
                 continue  # Device is not managed by this config entry
 
             device = self._devices.get(formatted_mac)
@@ -668,6 +756,34 @@ class NetworkDeviceScanner:
 
         await self._async_process_device_offline(current_devices, now)
 
+    def _generate_better_name(self, device: NetworkDevice) -> tuple[str, bool]:
+        """Generate a better name for a device based on available information.
+
+        Returns:
+            tuple: (better_name, is_significant_improvement)
+        """
+        current_name = device.name or f"Device {device.mac_address[-4:]}"
+
+        # Check if we have a hostname
+        if device.name and len(device.name) > 1 and not device.name.startswith("Device "):
+            # We have a good hostname
+
+            # If we also have vendor information, include it
+            if device.vendor and len(device.vendor) > 1:
+                better_name = f"{device.name} ({device.vendor})"
+                return better_name, True
+
+            # Just the hostname is still good
+            return device.name, True
+
+        # If we have vendor but no good hostname
+        if device.vendor and len(device.vendor) > 1:
+            better_name = f"{device.vendor} {device.mac_address[-4:]}"
+            return better_name, True
+
+        # No significant improvement possible
+        return current_name, False
+
     async def _async_mark_missing_devices_as_not_home(self):
         """Mark devices not found in the first scan as not_home."""
         now = dt_util.now()
@@ -684,6 +800,90 @@ class NetworkDeviceScanner:
                 mac_address,
             )  # Signal device missing
 
+    async def _try_rename_existing_entity(self, mac_address: str, device_data: dict[str, Any]) -> None:
+        """Try to rename an existing entity if better information is available."""
+        registry = er.async_get(self._hass)
+
+        # Check if this MAC address has an existing entity
+        existing_entity = self._existing_mac_entities.get(mac_address)
+        if not existing_entity:
+            return
+
+        # Create a temporary device object to use our naming logic
+        temp_device = NetworkDevice(mac_address)
+        temp_device.update_from_data(device_data)
+
+        # Generate a better name
+        better_name, is_significant = self._generate_better_name(temp_device)
+        if not is_significant:
+            return
+
+        entity_id = existing_entity["entity_id"]
+        _LOGGER.debug(
+            "Found better name '%s' for existing entity %s (MAC: %s)",
+            better_name, entity_id, mac_address
+        )
+
+        try:
+            # Get the current entity state
+            state = self._hass.states.get(entity_id)
+            if not state:
+                return
+
+            current_name = state.name
+
+            # Check if the current name is already good
+            if current_name and len(current_name) > 1 and ":" not in current_name and "-" not in current_name:
+                # Current name seems good, only replace if we have a hostname and vendor
+                if not (temp_device.name and temp_device.vendor):
+                    return
+
+            # Update friendly name if enabled
+            if self._auto_rename_friendly:
+                _LOGGER.info(
+                    "Renaming entity %s friendly name from '%s' to '%s'",
+                    entity_id, current_name, better_name
+                )
+
+                # Update the friendly name via service call
+                await self._hass.services.async_call(
+                    "homeassistant", "update_entity_attributes",
+                    {
+                        "entity_id": entity_id,
+                        "friendly_name": better_name
+                    },
+                    blocking=True
+                )
+
+            # Update entity ID if enabled
+            if self._auto_rename_entity and temp_device.name:
+                # Generate a valid entity ID from the device name
+                domain = entity_id.split(".", 1)[0]
+                new_entity_id = f"{domain}.{temp_device.name.lower().replace(' ', '_')}"
+
+                # Check if this entity ID already exists
+                if new_entity_id != entity_id and not self._hass.states.get(new_entity_id):
+                    _LOGGER.info(
+                        "Renaming entity ID from %s to %s",
+                        entity_id, new_entity_id
+                    )
+
+                    # Update the entity ID in the registry
+                    registry.async_update_entity(
+                        entity_id=entity_id,
+                        new_entity_id=new_entity_id
+                    )
+
+                    # Update our tracking dictionaries
+                    self._existing_mac_entities[mac_address]["entity_id"] = new_entity_id
+
+                    # If this entity is in our known MAC addresses, update that too
+                    if mac_address in self._known_mac_addresses:
+                        self._known_mac_addresses[mac_address] = new_entity_id.split(".", 1)[1]
+
+        except Exception as ex:
+            _LOGGER.error("Error renaming entity %s: %s", entity_id, ex)
+
     async def _async_process_device_offline(
         self, current_devices: dict[str, NetworkDevice], now: datetime
     ):
@@ -691,30 +891,56 @@ class NetworkDeviceScanner:
         devices_to_remove = []
         for mac_address, device in self._devices.items():
             if mac_address not in current_devices:  # Device not in current scan
-                if device.online:  # Device was online before, now offline
+                if device.online:  # Device was online before, now missing from scan
                     if not device.first_offline:
                         device.first_offline = now  # Mark first offline time
+                        # Reset verification attempts counter
+                        device.verification_attempts = 0
                     elif (
                         device.first_offline
                         + timedelta(seconds=DEVICE_SCAN_INTERVAL * 3)
                         < now
-                    ):  # Consider offline after 3 missed scans (adjust as needed)
-                        device.online = False
-                        # Make sure the device exists in _devices before sending update
-                        if mac_address in self._devices:
-                            async_dispatcher_send(
-                                self._hass, signal_device_update(mac_address), False
-                            )  # Signal offline
+                    ):
+                        # Determine max verification attempts based on device reliability
+                        if device.reliability_score < 50:
+                            # Less reliable devices get more verification attempts
+                            max_verification_attempts = VERIFICATION_ATTEMPTS * 2
+                        else:
+                            max_verification_attempts = VERIFICATION_ATTEMPTS
+
+                        # Time to actively verify if the device is truly offline
+                        if device.verification_attempts < max_verification_attempts:
+                            # Increment verification counter
+                            device.verification_attempts += 1
+                            # Schedule active verification
+                            self._hass.async_create_task(
+                                self._verify_device_connectivity(device)
+                            )
+                        else:
+                            # We've tried verification multiple times, mark as offline
+                            device.online = False
+                            # Update reliability metrics
+                            device.offline_frequency += 1
+                            device.reliability_score = max(0, device.reliability_score - 5)
+
+                            _LOGGER.debug(
+                                "Device %s (%s) marked offline after %d verification attempts",
+                                device.name, device.mac_address, device.verification_attempts
+                            )
+
+                            # Make sure the device exists in _devices before sending update
+                            if mac_address in self._devices:
+                                async_dispatcher_send(
+                                    self._hass, signal_device_update(mac_address), False
+                                )  # Signal offline
                 elif (
                     not device.online
                     and device.first_offline
                     and device.first_offline
                     + timedelta(seconds=DEVICE_SCAN_INTERVAL * 6)
                     < now
-                ):  # Remove device after longer offline period (adjust as needed)
-                    devices_to_remove.append(
-                        mac_address
-                    )  # Mark for removal if offline for longer duration
+                ):  # Remove device after longer offline period
+                    devices_to_remove.append(mac_address)
 
         for mac_address in devices_to_remove:
             self._devices.pop(mac_address)  # Remove devices offline for extended period

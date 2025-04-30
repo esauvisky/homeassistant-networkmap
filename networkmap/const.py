@@ -45,3 +45,18 @@ BETTERCAP_NET_RECON_OFF = "net.recon off"
 BETTERCAP_NET_SHOW_META_ON = "set net.show.meta true"
 BETTERCAP_ZEROGOD_DISCOVERY_ON = "zerogod.discovery on"
 BETTERCAP_ZEROGOD_DISCOVERY_OFF = "zerogod.discovery off"
+
+# Targeted verification commands
+BETTERCAP_NET_PROBE_TARGET = "net.probe {target}"  # For targeted probing
+BETTERCAP_ARP_PROBE_TARGET = "arp.probe {target}"  # For ARP probing
+BETTERCAP_PING_TARGET = "net.ping {target}"        # For ICMP ping
+
+# Verification settings
+VERIFICATION_ATTEMPTS = 2  # Number of verification attempts before marking offline
+VERIFICATION_DELAY = 5     # Delay between verification attempts (seconds)
+
+# Device naming options
+CONF_AUTO_RENAME_FRIENDLY = "auto_rename_friendly"  # Auto-rename friendly name when better info is available
+CONF_AUTO_RENAME_ENTITY = "auto_rename_entity"      # Auto-rename entity ID when better info is available
+DEFAULT_AUTO_RENAME_FRIENDLY = True                 # Default: rename friendly names
+DEFAULT_AUTO_RENAME_ENTITY = False                  # Default: don't rename entity IDs
