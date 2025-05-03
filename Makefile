@@ -26,7 +26,7 @@ bump-version:
 # Copy files to Home Assistant custom_components directory
 copy:
 	@echo "Copying files to Home Assistant custom_components directory..."
-	cp ./networkmap ~/Files/HASS/config/custom_components -r
+	cp ./networkmap /home/emi/Files/HASS/config/custom_components -r
 
 # Restart Home Assistant container
 restart:
@@ -37,3 +37,7 @@ restart:
 clean:
 	@echo "Cleaning up..."
 	# Add any cleanup commands here if needed
+
+# Clean target (optional)
+logs:
+	ssh emi.casa docker logs -f homeassistant
