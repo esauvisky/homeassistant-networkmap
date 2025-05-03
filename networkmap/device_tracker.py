@@ -29,6 +29,13 @@ async def async_setup_entry(
     def device_new(mac_address):
         """Signal a new device."""
         device = scanner._devices.get(mac_address)
+        if not device:
+            _LOGGER.warning("Received signal for unknown device: %s", mac_address)
+            return
+
+        # Mark the device as having an entity
+        device.entity_created = True
+
         name = device.name if device else f"Unknown {mac_address[-4:]}"
         _LOGGER.info("Adding new device tracker entity: %s (%s)", name, mac_address)
         async_add_entities([NetworkMapDeviceTrackerEntity(scanner, mac_address, True)])
@@ -215,6 +222,7 @@ class NetworkMapDeviceTrackerEntity(ScannerEntity):
                 "2G": device.is_2g,
                 "5G": device.is_5g,
                 "meta": getattr(device, "meta", {}),
+                "device_type": device.device_type,
                 "device_model": device.device_model,
                 "device_friendly_name": device.device_friendly_name
             }
@@ -249,6 +257,9 @@ class NetworkMapDeviceTrackerEntity(ScannerEntity):
         if device.device_friendly_name:
             attributes["friendly_device_name"] = device.device_friendly_name
 
+        if device.device_type:
+            attributes["device_category"] = device.device_type
+
         if device.mdns_services and len(device.mdns_services) > 0:
             attributes["services"] = ", ".join(device.mdns_services)
 
@@ -258,6 +269,9 @@ class NetworkMapDeviceTrackerEntity(ScannerEntity):
 
         if device.last_seen:
             attributes["last_seen"] = device.last_seen
+
+        if device.type:
+            attributes["device_type"] = device.type
 
         if device.os_type:
             attributes["os_type"] = device.os_type
@@ -284,14 +298,14 @@ class NetworkMapDeviceTrackerEntity(ScannerEntity):
         if hasattr(device, "meta") and isinstance(device.meta, dict):
             for key, value in device.meta.items():
                 # Convert meta keys to valid attribute names
-                attr_key = key.replace(":", "_").replace(".", "_")
+                attr_key = key.replace(":", "_").replace(".", "_").lower()
 
                 # Handle JSON objects and lists by splitting them into multiple attributes
                 if isinstance(value, dict):
                     # For dictionaries, create separate attributes for each key
                     for sub_key, sub_value in value.items():
-                        sub_attr_key = f"{attr_key}_{sub_key}".replace(":", "_").replace(".", "_")
-                        if sub_attr_key not in attributes:
+                        sub_attr_key = f"{attr_key}_{sub_key}".replace(":", "_").replace(".", "_").lower()
+                        if sub_attr_key not in attributes and not isinstance(sub_value, (dict, list)):
                             attributes[sub_attr_key] = sub_value
                 elif isinstance(value, list):
                     # For lists, create indexed attributes or join simple values
@@ -302,7 +316,7 @@ class NetworkMapDeviceTrackerEntity(ScannerEntity):
                         # For complex items, create indexed attributes
                         for i, item in enumerate(value):
                             if not isinstance(item, (dict, list)):
-                                indexed_key = f"{attr_key}_{i}".replace(":", "_").replace(".", "_")
+                                indexed_key = f"{attr_key}_{i}".replace(":", "_").replace(".", "_").lower()
                                 if indexed_key not in attributes:
                                     attributes[indexed_key] = item
                 elif attr_key not in attributes:

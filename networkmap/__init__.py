@@ -130,6 +130,11 @@ class NetworkDevice:
         self.reliability_score: int = 100 # Start with perfect score
         self.offline_frequency: int = 0   # Track how often device goes offline
 
+        # Entity tracking
+        self.entity_created: bool = False  # Whether an entity has been created for this device
+        self.first_discovered: datetime = dt_util.now()  # When the device was first discovered
+        self.consecutive_scans: int = 0  # Number of consecutive scans this device has been seen in
+
         # Enhanced device identification
         self.device_model: str | None = None
         self.device_friendly_name: str | None = None
@@ -773,38 +778,30 @@ class NetworkDeviceScanner:
                 device = NetworkDevice(formatted_mac)
                 self._devices[formatted_mac] = device
 
-                # Update device data before deciding whether to add it
+                # Update device data
                 device.update_from_data(raw_device_data)
 
-                # Check if we can generate a good name for this device
-                better_name, is_significant = self._generate_better_name(device)
+                # Log that we've discovered a new device but won't create an entity yet
+                _LOGGER.info("Discovered new device: %s (%s) - deferring entity creation",
+                            name or f"Unknown {formatted_mac[-4:]}", formatted_mac)
+            else:
+                # Get the device from our devices dictionary
+                device = self._devices[formatted_mac]
 
-                if is_significant and better_name and not better_name.startswith("Device "):
-                    _LOGGER.debug("Discovered new device with good name: %s (%s)", better_name, formatted_mac)
+                # Update device data
+                device.update_from_data(raw_device_data)
 
-                    # Signal new device only if we have a good name
-                    async_dispatcher_send(
-                        self._hass,
-                        f"{DOMAIN}_device_new_{self._entry.entry_id}",
-                        formatted_mac,
-                    )
-                else:
-                    _LOGGER.debug("Discovered new device but waiting for better name: %s", formatted_mac)
-                    # We'll keep the device in our internal tracking but won't create an entity yet
-
-            # Get the device from our devices dictionary
-            device = self._devices[formatted_mac]
-
-            # Update device data
-            device.update_from_data(raw_device_data)
+                # Increment consecutive scans counter
+                device.consecutive_scans += 1
 
             # Explicitly mark as online and reset offline tracking
             device.online = True
             device.first_offline = None
             device.verification_attempts = 0
 
-            # Signal device update (online)
-            async_dispatcher_send(self._hass, signal_device_update(formatted_mac), True)
+            # Signal device update (online) only if entity already exists
+            if device.entity_created:
+                async_dispatcher_send(self._hass, signal_device_update(formatted_mac), True)
 
             # Add to found MACs
             found_macs.add(formatted_mac)
@@ -812,7 +809,111 @@ class NetworkDeviceScanner:
             # Try to update existing entity if better info is available
             await self._try_update_existing_entity(formatted_mac, raw_device_data)
 
+        # Process pending devices that might be ready for entity creation
+        await self._process_pending_devices()
+
         return found_macs
+
+    def _is_device_ready_for_entity(self, device: NetworkDevice) -> bool:
+        """Determine if a device has sufficient information to create an entity.
+
+        Evaluates device readiness based on data richness and consistency over time.
+        """
+        now = dt_util.now()
+
+        # Always create entities for known MACs from our integration
+        if device.mac_address in self._known_mac_addresses:
+            _LOGGER.debug("Device %s is ready: known MAC from integration", device.mac_address)
+            return True
+
+        # Check data richness criteria
+        better_name, is_significant = self._generate_better_name(device)
+        has_good_name = is_significant and better_name and not better_name.startswith("Device ")
+        has_vendor = bool(device.vendor and len(device.vendor) > 1)
+        has_friendly_name = bool(device.device_friendly_name and len(device.device_friendly_name) > 1)
+        has_device_model = bool(device.device_model and len(device.device_model) > 1)
+        has_device_type = bool(device.device_type)
+        has_mdns_services = len(device.mdns_services) > 0
+
+        # Calculate a data richness score (0-10)
+        data_richness = 0
+        if has_good_name:
+            data_richness += 3
+        if has_vendor:
+            data_richness += 2
+        if has_friendly_name:
+            data_richness += 2
+        if has_device_model:
+            data_richness += 1
+        if has_device_type:
+            data_richness += 1
+        if has_mdns_services:
+            data_richness += 1
+
+        # Check time/consistency criteria
+        time_since_discovery = (now - device.first_discovered).total_seconds()
+        scan_interval_seconds = self._scan_interval.total_seconds()
+
+        # Device has been seen in multiple consecutive scans
+        consistent_presence = device.consecutive_scans >= 3
+
+        # Device has been around for a while (at least 2 scan intervals)
+        sufficient_time = time_since_discovery > (scan_interval_seconds * 2)
+
+        # Fallback timeout (create entity after 5 scan intervals even with suboptimal data)
+        fallback_timeout = time_since_discovery > (scan_interval_seconds * 5)
+
+        # Decision logic
+        if fallback_timeout and has_good_name:
+            # After fallback timeout, create entity if we at least have a good name
+            _LOGGER.debug("Device %s is ready: fallback timeout reached with good name", device.mac_address)
+            return True
+
+        if consistent_presence and sufficient_time:
+            if data_richness >= 5:
+                # Device has been consistently present and has rich data
+                _LOGGER.debug("Device %s is ready: consistent presence with rich data (score: %d)",
+                             device.mac_address, data_richness)
+                return True
+            elif data_richness >= 3 and has_good_name:
+                # Device has been consistently present with moderate data but good name
+                _LOGGER.debug("Device %s is ready: consistent presence with moderate data and good name",
+                             device.mac_address)
+                return True
+
+        # Special case for devices with very rich data - create entity sooner
+        if data_richness >= 7 and device.consecutive_scans >= 2:
+            _LOGGER.debug("Device %s is ready: very rich data (score: %d) after %d scans",
+                         device.mac_address, data_richness, device.consecutive_scans)
+            return True
+
+        # Not ready yet
+        return False
+
+    async def _process_pending_devices(self):
+        """Process devices that don't have entities yet but might be ready."""
+        for mac_address, device in list(self._devices.items()):
+            # Skip devices that already have entities
+            if device.entity_created:
+                continue
+
+            # Check if device is ready for entity creation
+            if self._is_device_ready_for_entity(device):
+                # Generate the best name we can for logging
+                better_name, _ = self._generate_better_name(device)
+
+                _LOGGER.info("Creating entity for device: %s (%s) - seen in %d scans",
+                            better_name, mac_address, device.consecutive_scans)
+
+                # Mark as having an entity
+                device.entity_created = True
+
+                # Signal new device
+                async_dispatcher_send(
+                    self._hass,
+                    f"{DOMAIN}_device_new_{self._entry.entry_id}",
+                    mac_address,
+                )
 
     def _generate_better_name(self, device: NetworkDevice) -> tuple[str, bool]:
         """Generate a better name for a device based on available information.
@@ -852,7 +953,7 @@ class NetworkDeviceScanner:
                 return better_name, True
 
             # Just the hostname is still good
-            return hostname, True
+            return hostname, False
 
         # Third priority: Use device model with vendor
         if device.device_model and len(device.device_model) > 1:
@@ -875,11 +976,18 @@ class NetworkDeviceScanner:
         now = dt_util.now()
         for mac_address, original_name in self._known_mac_addresses.items():
             if mac_address in self._devices:                       # Already tracked in first scan
+                # Mark existing device as having an entity
+                self._devices[mac_address].entity_created = True
                 continue
+
             device = NetworkDevice(mac_address)
             device.name = original_name
             device.first_offline = now                             # Mark first offline time
+            device.entity_created = True                           # Mark as having an entity since it's from registry
             self._devices[mac_address] = device
+
+            _LOGGER.info("Recreating existing device from registry: %s (%s)", original_name, mac_address)
+
             async_dispatcher_send(
                 self._hass,
                 f"{DOMAIN}_device_missing_{self._entry.entry_id}",
@@ -895,6 +1003,9 @@ class NetworkDeviceScanner:
         # Safety check for None
         if device_data is None:
             return source, icon
+
+        # Get device type if available
+        device_type = device_data.get("device_type")
 
         # Check if device has wireless data
         if device_data.get("is_wireless") or device_data.get("rssi") or device_data.get("2G") or device_data.get("5G"):
@@ -934,6 +1045,20 @@ class NetworkDeviceScanner:
                 icon = "mdi:raspberry-pi"
             elif "asus" in vendor:
                 icon = "mdi:router-network"
+
+        # Override based on device type if available
+        if device_type == "cast":
+            source = "cast"
+            icon = "mdi:cast"
+        elif device_type == "esphome":
+            source = "esphome"
+            icon = "mdi:chip"
+        elif device_type == "homekit":
+            source = "homekit"
+            icon = "mdi:home-automation"
+        elif device_type == "android_tv":
+            source = "android_tv"
+            icon = "mdi:android-tv"
 
         return source, icon
 
