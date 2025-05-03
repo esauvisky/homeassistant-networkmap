@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import homeassistant.util.dt as dt_util
 from homeassistant.components.device_tracker import ScannerEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
