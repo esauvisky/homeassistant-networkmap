@@ -64,10 +64,6 @@ from .const import (
     BETTERCAP_PING_TARGET,
     VERIFICATION_ATTEMPTS,
     VERIFICATION_DELAY,
-    CONF_AUTO_RENAME_FRIENDLY,
-    CONF_AUTO_RENAME_ENTITY,
-    DEFAULT_AUTO_RENAME_FRIENDLY,
-    DEFAULT_AUTO_RENAME_ENTITY,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -255,9 +251,6 @@ class NetworkDeviceScanner:
         self._entry = entry
         self._config = entry.data
         self._scan_interval = timedelta(seconds=entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL))
-        # Get device naming options
-        self._auto_rename_friendly = self._config.get(CONF_AUTO_RENAME_FRIENDLY, DEFAULT_AUTO_RENAME_FRIENDLY)
-        self._auto_rename_entity = self._config.get(CONF_AUTO_RENAME_ENTITY, DEFAULT_AUTO_RENAME_ENTITY)
         self._devices: dict[str, NetworkDevice] = {}
         self._scan_lock = asyncio.Lock()
         self._session = async_get_clientsession(hass)
@@ -779,14 +772,25 @@ class NetworkDeviceScanner:
                 # Create a new device
                 device = NetworkDevice(formatted_mac)
                 self._devices[formatted_mac] = device
-                _LOGGER.debug("Discovered new device: %s", formatted_mac)
 
-                # Signal new device
-                async_dispatcher_send(
-                    self._hass,
-                    f"{DOMAIN}_device_new_{self._entry.entry_id}",
-                    formatted_mac,
-                )
+                # Update device data before deciding whether to add it
+                device.update_from_data(raw_device_data)
+
+                # Check if we can generate a good name for this device
+                better_name, is_significant = self._generate_better_name(device)
+
+                if is_significant and better_name and not better_name.startswith("Device "):
+                    _LOGGER.debug("Discovered new device with good name: %s (%s)", better_name, formatted_mac)
+
+                    # Signal new device only if we have a good name
+                    async_dispatcher_send(
+                        self._hass,
+                        f"{DOMAIN}_device_new_{self._entry.entry_id}",
+                        formatted_mac,
+                    )
+                else:
+                    _LOGGER.debug("Discovered new device but waiting for better name: %s", formatted_mac)
+                    # We'll keep the device in our internal tracking but won't create an entity yet
 
             # Get the device from our devices dictionary
             device = self._devices[formatted_mac]
@@ -805,9 +809,8 @@ class NetworkDeviceScanner:
             # Add to found MACs
             found_macs.add(formatted_mac)
 
-            # Try to rename existing entity if needed
-            if self._auto_rename_friendly or self._auto_rename_entity:
-                await self._try_rename_existing_entity(formatted_mac, raw_device_data)
+            # Try to update existing entity if better info is available
+            await self._try_update_existing_entity(formatted_mac, raw_device_data)
 
         return found_macs
 
@@ -886,15 +889,12 @@ class NetworkDeviceScanner:
     def _determine_source_and_icon(self, device_data: dict[str, Any]) -> tuple[str, str]:
         """Determine the source type and icon based on device data."""
         # Default values
-        source = "bettercap"
+        source = "Bettercap"
         icon = "mdi:lan-connect"
 
         # Safety check for None
         if device_data is None:
             return source, icon
-
-        # Get device type if available
-        device_type = device_data.get("device_type")
 
         # Check if device has wireless data
         if device_data.get("is_wireless") or device_data.get("rssi") or device_data.get("2G") or device_data.get("5G"):
@@ -934,20 +934,6 @@ class NetworkDeviceScanner:
                 icon = "mdi:raspberry-pi"
             elif "asus" in vendor:
                 icon = "mdi:router-network"
-
-        # Override based on device type if available
-        if device_type == "cast":
-            source = "cast"
-            icon = "mdi:cast"
-        elif device_type == "esphome":
-            source = "esphome"
-            icon = "mdi:chip"
-        elif device_type == "homekit":
-            source = "homekit"
-            icon = "mdi:home-automation"
-        elif device_type == "android_tv":
-            source = "android_tv"
-            icon = "mdi:android-tv"
 
         return source, icon
 
@@ -1014,12 +1000,19 @@ class NetworkDeviceScanner:
         except Exception as ex:
             _LOGGER.error("Error updating existing entity %s: %s", entity_id, ex)
 
-    async def _try_rename_existing_entity(self, mac_address: str, device_data: dict[str, Any]) -> None:
-        """Try to rename an existing entity if better information is available."""
+    async def _try_update_existing_entity(self, mac_address: str, device_data: dict[str, Any]) -> None:
+        """Update an existing entity if better information is available, unless manually changed."""
         registry = er.async_get(self._hass)
 
         # Check if this MAC address has an existing entity
         existing_entity = self._existing_mac_entities.get(mac_address)
+        if not existing_entity:
+            # Also check if we have a device with the same hostname but different MAC
+            hostname = device_data.get("name", "").lower()
+            if hostname and hostname in self._existing_hostname_entities:
+                existing_entity = self._existing_hostname_entities[hostname]
+                _LOGGER.debug("Found entity with matching hostname %s but different MAC", hostname)
+
         if not existing_entity:
             return
 
@@ -1033,7 +1026,7 @@ class NetworkDeviceScanner:
             return
 
         entity_id = existing_entity["entity_id"]
-        _LOGGER.debug("Found better name '%s' for existing entity %s (MAC: %s)", better_name, entity_id, mac_address)
+        _LOGGER.debug("Found better info for existing entity %s (MAC: %s)", entity_id, mac_address)
 
         try:
             # Get the current entity state
@@ -1043,68 +1036,53 @@ class NetworkDeviceScanner:
 
             current_name = state.name
 
-            # Check if the current name is already good
-            if current_name and len(current_name) > 1 and ":" not in current_name and "-" not in current_name:
-                # Current name seems good, only replace if we have a hostname and vendor
-                if not (temp_device.name and temp_device.vendor):
-                    return
+            # Check if the entity has a customized name (manually changed)
+            entity_entry = registry.async_get(entity_id)
+            has_custom_name = entity_entry and entity_entry.name is not None
 
-            # Update friendly name if enabled
-            if self._auto_rename_friendly:
-                _LOGGER.info("Renaming entity %s friendly name from '%s' to '%s'", entity_id, current_name, better_name)
+            # Only update if the name wasn't manually customized
+            if not has_custom_name:
+                # Check if the current name is generic or less informative
+                should_update_name = False
 
-                # Update the friendly name via service call
-                await self._hass.services.async_call("homeassistant",
-                                                     "update_entity", {"entity_id": entity_id, "name": better_name},
-                                                     blocking=True)
+                # Update if current name is generic or contains MAC-like patterns
+                if (not current_name or
+                    current_name.startswith("Device ") or
+                    current_name.startswith("Unknown ") or
+                    ":" in current_name or
+                    (len(current_name) < len(better_name) and temp_device.vendor)):
+                    should_update_name = True
 
-            # Update entity ID if enabled
-            if self._auto_rename_entity and temp_device.name:
-                # Clean up the name for entity ID - only use the base hostname
-                clean_name = temp_device.name
+                # If the current name doesn't have vendor info but new one does
+                if (temp_device.vendor and
+                    "(" not in current_name and
+                    temp_device.vendor.lower() not in current_name.lower()):
+                    should_update_name = True
 
-                # Remove .local suffix and trailing dots
-                if clean_name.endswith(".local"):
-                    clean_name = clean_name[:-6] # Remove .local
-                while clean_name and clean_name.endswith("."):
-                    clean_name = clean_name[:-1] # Remove trailing dot
+                if should_update_name:
+                    _LOGGER.info("Updating entity %s name from '%s' to '%s'", entity_id, current_name, better_name)
 
-                # Remove any vendor information that might be in parentheses
-                if "(" in clean_name:
-                    clean_name = clean_name.split("(")[0].strip()
+                    # Update the friendly name via service call
+                    await self._hass.services.async_call(
+                        "homeassistant",
+                        "update_entity",
+                        {"entity_id": entity_id, "name": better_name},
+                        blocking=True
+                    )
+            else:
+                _LOGGER.debug("Not updating entity %s name because it was manually customized", entity_id)
 
-                # For device names with hyphens like "YLBulbColor1s-71CB", keep only the main part
-                if "-" in clean_name:
-                    parts = clean_name.split("-")
-                    # If the last part looks like a MAC suffix or ID (alphanumeric and 4-6 chars)
-                    if len(parts) > 1 and len(parts[-1]) <= 6 and parts[-1].isalnum():
-                        # Keep the device name and the ID part, but not other parts
-                        clean_name = f"{parts[0]}_{parts[-1]}"
+            # Always update other attributes with new information
+            await self._update_existing_device_tracker(entity_id, mac_address, device_data)
 
-                # Generate a valid entity ID from the device name
-                domain = entity_id.split(".", 1)[0]
-                new_entity_id = f"{domain}.{clean_name.lower().replace(' ', '_').replace('-', '_')}"
-
-                # Remove any special characters that aren't allowed in entity IDs
-                import re
-                new_entity_id = re.sub(r'[^a-z0-9_]+', '_', new_entity_id)
-
-                # Check if this entity ID already exists
-                if new_entity_id != entity_id and not self._hass.states.get(new_entity_id):
-                    _LOGGER.info("Renaming entity ID from %s to %s", entity_id, new_entity_id)
-
-                    # Update the entity ID in the registry
-                    registry.async_update_entity(entity_id=entity_id, new_entity_id=new_entity_id)
-
-                    # Update our tracking dictionaries
-                    self._existing_mac_entities[mac_address]["entity_id"] = new_entity_id
-
-                    # If this entity is in our known MAC addresses, update that too
-                    if mac_address in self._known_mac_addresses:
-                        self._known_mac_addresses[mac_address] = new_entity_id.split(".", 1)[1]
+            # If the entity is from a different integration but represents the same device,
+            # we should update our internal tracking to include this MAC address
+            if mac_address not in self._known_mac_addresses:
+                self._known_mac_addresses[mac_address] = entity_id.split(".", 1)[1]
+                _LOGGER.debug("Added MAC %s to known addresses for entity %s", mac_address, entity_id)
 
         except Exception as ex:
-            _LOGGER.error("Error renaming entity %s: %s", entity_id, ex)
+            _LOGGER.error("Error updating entity %s: %s", entity_id, ex)
 
     async def _async_process_device_offline(self, found_macs: set[str], now: datetime):
         """Process devices that are offline or missing in the current scan."""
