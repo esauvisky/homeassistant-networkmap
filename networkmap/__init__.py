@@ -111,7 +111,6 @@ def signal_device_update(mac_address) -> str:
 
 class NetworkDevice:
     """Class for keeping track of a network device."""
-
     def __init__(self, mac_address: str):
         """Initialize the device."""
         self.mac_address = mac_address
@@ -132,8 +131,17 @@ class NetworkDevice:
         self.is_wireless: bool = False
         self.first_offline: datetime | None = None
         self.verification_attempts: int = 0
-        self.reliability_score: int = 100  # Start with perfect score
-        self.offline_frequency: int = 0    # Track how often device goes offline
+        self.reliability_score: int = 100 # Start with perfect score
+        self.offline_frequency: int = 0   # Track how often device goes offline
+
+        # Enhanced device identification
+        self.device_model: str | None = None
+        self.device_friendly_name: str | None = None
+        self.device_type: str | None = None
+        self.mdns_services: list[str] = []
+
+        # Store all metadata
+        self.meta: dict[str, Any] = {}
 
     @property
     def is_2g(self) -> bool:
@@ -149,6 +157,9 @@ class NetworkDevice:
         """Update device data from fetched data."""
         name = data.get("name") or data.get("nickName") or data.get("hostname")
         if name and name != self.name:
+            # Remove any trailing dots from hostname
+            while name and name.endswith("."):
+                name = name[:-1]
             self.name = name
 
         ip = data.get("ip") or data.get("ipv4")
@@ -198,44 +209,63 @@ class NetworkDevice:
         first_seen = data.get("first_seen")
         if first_seen and first_seen != self.first_seen:
             self.first_seen = first_seen
-            
+
         last_seen = data.get("last_seen")
         if last_seen and last_seen != self.last_seen:
             self.last_seen = last_seen
-            
+
         is_wireless = data.get("is_wireless", False)
         if is_wireless is not None and is_wireless != self.is_wireless:
             self.is_wireless = is_wireless
 
+        # Update enhanced device identification
+        device_model = data.get("device_model")
+        if device_model and device_model != self.device_model:
+            self.device_model = device_model
+
+        device_friendly_name = data.get("device_friendly_name")
+        if device_friendly_name and device_friendly_name != self.device_friendly_name:
+            self.device_friendly_name = device_friendly_name
+
+        device_type = data.get("device_type")
+        if device_type and device_type != self.device_type:
+            self.device_type = device_type
+
+        # Store all metadata
+        if "meta" in data and isinstance(data["meta"], dict):
+            self.meta = data["meta"]
+
+            # Extract mDNS services from metadata
+            services = []
+            for key in self.meta.keys():
+                if key.startswith("mdns:_") and key.endswith(":name"):
+                    service_name = key.split(":")[1]
+                    if service_name not in services:
+                        services.append(service_name)
+
+            if services:
+                self.mdns_services = services
+
 
 class NetworkDeviceScanner:
     """Scanner for network devices using Bettercap API."""
-
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         """Initialize the scanner."""
         self._hass = hass
         self._entry = entry
         self._config = entry.data
-        self._scan_interval = timedelta(
-            seconds=entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
-        )
+        self._scan_interval = timedelta(seconds=entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL))
         # Get device naming options
         self._auto_rename_friendly = self._config.get(CONF_AUTO_RENAME_FRIENDLY, DEFAULT_AUTO_RENAME_FRIENDLY)
         self._auto_rename_entity = self._config.get(CONF_AUTO_RENAME_ENTITY, DEFAULT_AUTO_RENAME_ENTITY)
         self._devices: dict[str, NetworkDevice] = {}
         self._scan_lock = asyncio.Lock()
         self._session = async_get_clientsession(hass)
-        self._api_url = BETTERCAP_API_URL.format(
-            host=self._config[CONF_HOST], 
-            port=self._config[CONF_PORT]
-        )
+        self._api_url = BETTERCAP_API_URL.format(host=self._config[CONF_HOST], port=self._config[CONF_PORT])
         # Set up authentication only if username and password are provided
         self._auth = None
         if self._config.get(CONF_USERNAME) and self._config.get(CONF_PASSWORD):
-            self._auth = aiohttp.BasicAuth(
-                self._config[CONF_USERNAME],
-                self._config[CONF_PASSWORD]
-            )
+            self._auth = aiohttp.BasicAuth(self._config[CONF_USERNAME], self._config[CONF_PASSWORD])
 
         # Set up API key header only if API key is provided
         self._headers = {}
@@ -252,28 +282,21 @@ class NetworkDeviceScanner:
         # Test connection to Bettercap
         try:
             # First try to access the session endpoint
-            async with self._session.get(
-                f"{self._api_url}/session", 
-                auth=self._auth,
-                headers=self._headers,
-                timeout=10
-            ) as response:
+            async with self._session.get(f"{self._api_url}/session", auth=self._auth, headers=self._headers, timeout=10) as response:
                 if response.status != 200:
                     _LOGGER.error("Failed to connect to Bettercap session API: %s", response.status)
                     # Try the status endpoint as fallback
-                    async with self._session.get(
-                        f"{self._api_url}/", 
-                        auth=self._auth,
-                        headers=self._headers,
-                        timeout=10
-                    ) as status_response:
+                    async with self._session.get(f"{self._api_url}/",
+                                                 auth=self._auth,
+                                                 headers=self._headers,
+                                                 timeout=10) as status_response:
                         if status_response.status != 200:
                             _LOGGER.error("Failed to connect to Bettercap API: %s", status_response.status)
                             return False
         except aiohttp.ClientError as err:
             _LOGGER.error("Error connecting to Bettercap: %s", err)
             return False
-            
+
         # Enable the appropriate modules based on configuration
         await self._enable_modules()
 
@@ -286,10 +309,7 @@ class NetworkDeviceScanner:
         # Get entities for this config entry
         self._known_mac_addresses = {
             entry.unique_id: entry.original_name
-            for entry in registry.entities.get_entries_for_config_entry_id(
-                self._entry.entry_id
-            )
-        }
+            for entry in registry.entities.get_entries_for_config_entry_id(self._entry.entry_id)}
 
         # Find all device_tracker entities in the system to check for MAC address and hostname matches
         self._existing_mac_entities = {}
@@ -300,12 +320,8 @@ class NetworkDeviceScanner:
         for entity_id, entity in registry.entities.items():
             if entity.domain == "device_tracker":
                 all_device_trackers[entity_id] = {
-                    "entity_id": entity_id,
-                    "config_entry_id": entity.config_entry_id,
-                    "disabled": entity.disabled,
-                    "unique_id": entity.unique_id,
-                    "original_name": entity.original_name
-                }
+                    "entity_id": entity_id, "config_entry_id": entity.config_entry_id, "disabled": entity.disabled,
+                    "unique_id": entity.unique_id, "original_name": entity.original_name}
 
         # Second pass: check for MAC addresses in unique_ids and attributes
         for entity_id, entity_data in all_device_trackers.items():
@@ -313,7 +329,7 @@ class NetworkDeviceScanner:
             if entity_data["unique_id"] and ":" in entity_data["unique_id"]:
                 mac_parts = entity_data["unique_id"].split("_")
                 for part in mac_parts:
-                    if ":" in part and len(part) >= 17:  # MAC addresses are at least 17 chars with colons
+                    if ":" in part and len(part) >= 17: # MAC addresses are at least 17 chars with colons
                         self._existing_mac_entities[format_mac(part)] = entity_data
 
             # Store by hostname (entity ID without domain) for later matching
@@ -354,10 +370,7 @@ class NetworkDeviceScanner:
             await self._async_start_scanner()
         else:
             self._entry.async_on_unload(
-                self._hass.bus.async_listen_once(
-                    EVENT_HOMEASSISTANT_STARTED, self._async_start_scanner
-                )
-            )
+                self._hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, self._async_start_scanner))
         return True
 
     async def _async_start_scanner(self, _=None) -> None:
@@ -367,50 +380,48 @@ class NetworkDeviceScanner:
             self._async_scan_devices,
             self._scan_interval,
         )
-        
+
         # Also start a periodic reverification of offline devices
         self._unsub_reverify = async_track_time_interval(
             self._hass,
             self._async_scheduled_reverification,
-            timedelta(minutes=15),  # Try to rediscover offline devices every 15 minutes
+            timedelta(minutes=15),                        # Try to rediscover offline devices every 15 minutes
         )
 
     async def _enable_modules(self) -> None:
         """Enable the appropriate Bettercap modules based on configuration."""
         # Define which modules to enable based on config
         modules_to_enable = []
-        
+
         if self._config.get(CONF_ENABLE_NET_PROBE, True):
             modules_to_enable.append(BETTERCAP_NET_PROBE_ON)
-        
+
         if self._config.get(CONF_ENABLE_NET_SNIFF, False):
             modules_to_enable.append(BETTERCAP_NET_SNIFF_ON)
-            
+
         if self._config.get(CONF_ENABLE_ARP_SPOOF, False):
             modules_to_enable.append(BETTERCAP_ARP_SPOOF_ON)
-            
+
         if self._config.get(CONF_ENABLE_TICKER, False):
             modules_to_enable.append(BETTERCAP_TICKER_ON)
-            
+
         if self._config.get(CONF_ENABLE_NET_RECON, False):
             modules_to_enable.append(BETTERCAP_NET_RECON_ON)
             modules_to_enable.append(BETTERCAP_NET_SHOW_META_ON)
-            
+
         if self._config.get(CONF_ENABLE_ZEROGOD, False):
             modules_to_enable.append(BETTERCAP_ZEROGOD_DISCOVERY_ON)
-        
+
         # Enable each module
         for cmd in modules_to_enable:
             try:
                 _LOGGER.debug("Sending Bettercap command: %s", cmd)
                 cmd_data = {"cmd": cmd}
-                async with self._session.post(
-                    f"{self._api_url}/session",
-                    auth=self._auth,
-                    headers=self._headers,
-                    json=cmd_data,
-                    timeout=10
-                ) as response:
+                async with self._session.post(f"{self._api_url}/session",
+                                              auth=self._auth,
+                                              headers=self._headers,
+                                              json=cmd_data,
+                                              timeout=10) as response:
                     if response.status not in (200, 204):
                         _LOGGER.warning("Failed to execute command %s: %s", cmd, response.status)
                     else:
@@ -423,43 +434,41 @@ class NetworkDeviceScanner:
         if self._unsub_interval_scan:
             self._unsub_interval_scan()
             self._unsub_interval_scan = None
-            
+
         if hasattr(self, '_unsub_reverify') and self._unsub_reverify:
             self._unsub_reverify()
             self._unsub_reverify = None
-            
+
         # Disable modules when shutting down
         modules_to_disable = []
-        
+
         if self._config.get(CONF_ENABLE_NET_PROBE, True):
             modules_to_disable.append(BETTERCAP_NET_PROBE_OFF)
-        
+
         if self._config.get(CONF_ENABLE_NET_SNIFF, False):
             modules_to_disable.append(BETTERCAP_NET_SNIFF_OFF)
-            
+
         if self._config.get(CONF_ENABLE_ARP_SPOOF, False):
             modules_to_disable.append(BETTERCAP_ARP_SPOOF_OFF)
-            
+
         if self._config.get(CONF_ENABLE_TICKER, False):
             modules_to_disable.append(BETTERCAP_TICKER_OFF)
-            
+
         if self._config.get(CONF_ENABLE_NET_RECON, False):
             modules_to_disable.append(BETTERCAP_NET_RECON_OFF)
-            
+
         if self._config.get(CONF_ENABLE_ZEROGOD, False):
             modules_to_disable.append(BETTERCAP_ZEROGOD_DISCOVERY_OFF)
-        
+
         # Disable each module
         for cmd in modules_to_disable:
             try:
                 cmd_data = {"cmd": cmd}
-                async with self._session.post(
-                    f"{self._api_url}/session",
-                    auth=self._auth,
-                    headers=self._headers,
-                    json=cmd_data,
-                    timeout=10
-                ) as response:
+                async with self._session.post(f"{self._api_url}/session",
+                                              auth=self._auth,
+                                              headers=self._headers,
+                                              json=cmd_data,
+                                              timeout=10) as response:
                     if response.status not in (200, 204):
                         _LOGGER.warning("Failed to execute command %s: %s", cmd, response.status)
             except aiohttp.ClientError as err:
@@ -470,15 +479,12 @@ class NetworkDeviceScanner:
         try:
             # Get the full session data which includes all devices
             devices = {}
-            async with self._session.get(
-                f"{self._api_url}/session", 
-                auth=self._auth,
-                headers=self._headers,
-                timeout=10
-            ) as response:
+            _LOGGER.debug("Fetching device data from Bettercap API: %s", self._api_url)
+            async with self._session.get(f"{self._api_url}/session", auth=self._auth, headers=self._headers, timeout=10) as response:
                 if response.status == 200:
                     session_data = await response.json()
-                    
+                    _LOGGER.debug("Bettercap API response status: %s", response.status)
+
                     # Process LAN hosts
                     if "lan" in session_data and "hosts" in session_data["lan"]:
                         for host in session_data["lan"]["hosts"]:
@@ -488,24 +494,24 @@ class NetworkDeviceScanner:
                                 meta = host.get("meta", {})
                                 if isinstance(meta, dict) and "values" in meta:
                                     meta = meta.get("values", {})
-                                
+
                                 # Determine if device is wireless
                                 is_wireless = False
                                 if "wireless" in meta or "wifi" in meta:
                                     is_wireless = True
-                                
+
                                 # Extract traffic data if available
                                 traffic_data = {}
                                 if "packets" in session_data and "Traffic" in session_data["packets"]:
                                     ip = host.get("ipv4")
                                     if ip and ip in session_data["packets"]["Traffic"]:
                                         traffic_data = session_data["packets"]["Traffic"][ip]
-                                
+
                                 # Extract signal strength if available
                                 rssi = None
                                 if "rssi" in meta:
                                     rssi = str(meta.get("rssi"))
-                                
+
                                 # Determine frequency band if available
                                 is_2g = False
                                 is_5g = False
@@ -514,67 +520,126 @@ class NetworkDeviceScanner:
                                     if isinstance(freq, (int, float)):
                                         is_2g = freq < 5000
                                         is_5g = freq >= 5000
-                                
-                                devices[mac] = {
-                                    "name": host.get("hostname", ""),
-                                    "ip": host.get("ipv4", ""),
-                                    "vendor": host.get("vendor", ""),
-                                    "vendorclass": host.get("vendor", ""),
-                                    "online": True,
-                                    "is_wireless": is_wireless,
-                                    "rssi": rssi,
-                                    "last_seen": host.get("last_seen", ""),
-                                    "first_seen": host.get("first_seen", ""),
-                                    "2G": is_2g,
-                                    "5G": is_5g,
-                                    "curTx": str(traffic_data.get("Sent", 0)) if traffic_data else None,
-                                    "curRx": str(traffic_data.get("Received", 0)) if traffic_data else None,
-                                    "meta": meta
-                                }
-            
+
+                                # Extract useful metadata for device identification
+                                device_model = None
+                                device_friendly_name = None
+                                device_type = None
+
+                                # Look for device model/type in metadata
+                                if isinstance(meta, dict):
+                                    # Check for Google Cast devices
+                                    if "mdns:md" in meta:
+                                        device_model = meta.get("mdns:md")
+                                    if "mdns:fn" in meta:
+                                        device_friendly_name = meta.get("mdns:fn")
+
+                                    # Check for ESPHome devices
+                                    if "mdns:friendly_name" in meta:
+                                        device_friendly_name = meta.get("mdns:friendly_name")
+                                    if "mdns:platform" in meta and "mdns:board" in meta:
+                                        device_model = f"{meta.get('mdns:platform')} ({meta.get('mdns:board')})"
+
+                                    # Determine device type based on services
+                                    if any(k.startswith("mdns:_googlecast") for k in meta.keys()):
+                                        device_type = "cast"
+                                    elif any(k.startswith("mdns:_esphomelib") for k in meta.keys()):
+                                        device_type = "esphome"
+                                    elif any(k.startswith("mdns:_hap") for k in meta.keys()):
+                                        device_type = "homekit"
+                                    elif any(k.startswith("mdns:_androidtvremote") for k in meta.keys()):
+                                        device_type = "android_tv"
+
+                                # Get hostname and remove any trailing dots
+                                hostname = host.get("hostname", "")
+                                while hostname and hostname.endswith("."):
+                                    hostname = hostname[:-1]
+
+                                # Create the device data dictionary with all metadata
+                                device_data = {
+                                    "name": hostname, "ip": host.get("ipv4", ""), "vendor": host.get(
+                                        "vendor", ""), "vendorclass": host.get("vendor", ""), "online": True, "is_wireless": is_wireless, "rssi": rssi, "last_seen": host.get(
+                                            "last_seen", ""), "first_seen": host.get("first_seen", ""), "2G": is_2g, "5G": is_5g, "curTx": str(
+                                                traffic_data.get("Sent", 0)) if traffic_data else None, "curRx": str(
+                                                    traffic_data.get("Received", 0)) if traffic_data else None, "meta": meta,
+                                    "device_model": device_model, "device_friendly_name": device_friendly_name, "device_type": device_type}
+                                devices[mac] = device_data
+                                _LOGGER.debug("Found device from session/lan/hosts: %s (%s) - %s",
+                                              device_data.get("name"), mac, device_data.get("ip"))
+
             # If no devices found in session data, try the dedicated LAN endpoint
             if not devices:
                 await self._fetch_lan_devices(devices)
-            
+
             return devices
-            
+
         except aiohttp.ClientError as err:
             _LOGGER.error("Error fetching device data from Bettercap: %s", err)
             return None
         except Exception as e:
             _LOGGER.error("Unexpected error fetching device data: %s", e)
             return None
-    
+
     async def _fetch_lan_devices(self, devices: dict) -> None:
         """Fetch LAN devices from dedicated endpoint."""
         try:
             # Try the /session/lan endpoint
-            async with self._session.get(
-                f"{self._api_url}/session/lan", 
-                auth=self._auth,
-                headers=self._headers,
-                timeout=10
-            ) as response:
+            async with self._session.get(f"{self._api_url}/session/lan",
+                                         auth=self._auth,
+                                         headers=self._headers,
+                                         timeout=10) as response:
                 if response.status == 200:
                     lan_data = await response.json()
+                    _LOGGER.debug("Bettercap LAN API response: %s", lan_data)
                     for host in lan_data.get("hosts", []):
                         mac = host.get("mac", "").lower()
                         if mac and mac != "--" and mac != "-":
                             meta = host.get("meta", {})
                             if isinstance(meta, dict) and "values" in meta:
                                 meta = meta.get("values", {})
-                                
-                            devices[mac] = {
-                                "name": host.get("hostname", ""),
-                                "ip": host.get("ipv4", ""),
-                                "vendor": host.get("vendor", ""),
-                                "vendorclass": host.get("vendor", ""),
-                                "online": True,
-                                "is_wireless": False,
-                                "last_seen": host.get("last_seen", ""),
-                                "first_seen": host.get("first_seen", ""),
-                                "meta": meta
-                            }
+
+                            # Extract useful metadata for device identification
+                            device_model = None
+                            device_friendly_name = None
+                            device_type = None
+
+                            # Look for device model/type in metadata
+                            if isinstance(meta, dict):
+                                # Check for Google Cast devices
+                                if "mdns:md" in meta:
+                                    device_model = meta.get("mdns:md")
+                                if "mdns:fn" in meta:
+                                    device_friendly_name = meta.get("mdns:fn")
+
+                                # Check for ESPHome devices
+                                if "mdns:friendly_name" in meta:
+                                    device_friendly_name = meta.get("mdns:friendly_name")
+                                if "mdns:platform" in meta and "mdns:board" in meta:
+                                    device_model = f"{meta.get('mdns:platform')} ({meta.get('mdns:board')})"
+
+                                # Determine device type based on services
+                                if any(k.startswith("mdns:_googlecast") for k in meta.keys()):
+                                    device_type = "cast"
+                                elif any(k.startswith("mdns:_esphomelib") for k in meta.keys()):
+                                    device_type = "esphome"
+                                elif any(k.startswith("mdns:_hap") for k in meta.keys()):
+                                    device_type = "homekit"
+                                elif any(k.startswith("mdns:_androidtvremote") for k in meta.keys()):
+                                    device_type = "android_tv"
+
+                            # Get hostname and remove any trailing dots
+                            hostname = host.get("hostname", "")
+                            while hostname and hostname.endswith("."):
+                                hostname = hostname[:-1]
+
+                            device_data = {
+                                "name": hostname, "ip": host.get("ipv4", ""), "vendor": host.get(
+                                    "vendor", ""), "vendorclass": host.get("vendor", ""), "online": True, "is_wireless": False, "last_seen": host.get(
+                                        "last_seen", ""), "first_seen": host.get("first_seen", ""), "meta": meta,
+                                "device_model": device_model, "device_friendly_name": device_friendly_name, "device_type": device_type}
+                            devices[mac] = device_data
+                            _LOGGER.debug("Found device from /session/lan endpoint: %s (%s) - %s",
+                                          device_data.get("name"), mac, device_data.get("ip"))
         except aiohttp.ClientError as err:
             _LOGGER.error("Error fetching LAN devices: %s", err)
 
@@ -584,73 +649,104 @@ class NetworkDeviceScanner:
             _LOGGER.debug("Scan already in progress, skipping")
             return
 
+        now = dt_util.now()
+
         async with self._scan_lock:
             device_data = await self._async_fetch_device_data()
             if device_data:
-                await self._async_process_device_data(device_data)
+                found_macs = await self._async_process_device_data(device_data)
+                await self._async_process_device_offline(found_macs, now)
 
         if not self._finished_first_scan:
             self._finished_first_scan = True
             await self._async_mark_missing_devices_as_not_home()
 
     async def _verify_device_connectivity(self, device: NetworkDevice) -> None:
-        """Actively verify if a device is still connected to the network."""
+        """Actively verify if a device is still connected to the network using socket connection."""
         if not device.ip:
             _LOGGER.debug("Cannot verify device %s: no IP address", device.mac_address)
             return
 
-        _LOGGER.debug("Actively verifying connectivity for %s (%s)", device.name, device.ip)
-        
-        # Try different verification methods
-        verification_methods = [
-            # Method 1: Targeted net.probe
-            {"cmd": BETTERCAP_NET_PROBE_TARGET.format(target=device.ip)},
-            # Method 2: ARP probe
-            {"cmd": BETTERCAP_ARP_PROBE_TARGET.format(target=device.ip)},
-            # Method 3: ICMP ping
-            {"cmd": BETTERCAP_PING_TARGET.format(target=device.ip)}
-        ]
-        
-        for method in verification_methods:
-            try:
-                # Send the verification command
-                async with self._session.post(
-                    f"{self._api_url}/session",
-                    auth=self._auth,
-                    headers=self._headers,
-                    json=method,
-                    timeout=10
-                ) as response:
-                    if response.status in (200, 204):
-                        # Wait a moment for the command to take effect
-                        await asyncio.sleep(VERIFICATION_DELAY)
-                        
-                        # Check if the device responded by fetching updated device data
-                        device_data = await self._async_fetch_device_data()
-                        if device_data and device.mac_address in device_data:
-                            # Device responded to verification, mark as online
-                            _LOGGER.debug("Device %s verified as online", device.name)
-                            device.online = True
-                            device.first_offline = None
-                            device.verification_attempts = 0
-                            # Improve reliability score
-                            device.reliability_score = min(100, device.reliability_score + 2)
-                            # Update device data
-                            device.update_from_data(device_data[device.mac_address])
-                            # Signal device update
-                            async_dispatcher_send(
-                                self._hass, 
-                                signal_device_update(device.mac_address), 
-                                True
-                            )
-                            return  # Successfully verified, no need to try other methods
-            except Exception as ex:
-                _LOGGER.warning("Error during connectivity verification for %s: %s", device.name, ex)
-        
-        # If we get here, all verification methods failed
-        _LOGGER.debug("Device %s failed verification attempt %d", 
-                     device.name, device.verification_attempts)
-    
+        _LOGGER.info("Actively verifying connectivity for %s (%s) - attempt %d/%d", device.name, device.ip, device.verification_attempts, VERIFICATION_ATTEMPTS)
+
+        try:
+            # Use Python's socket module for TCP and ICMP ping
+            import socket
+            from concurrent.futures import ThreadPoolExecutor
+
+            # Define a function to check TCP connectivity
+            def check_tcp_port(ip, port, timeout=1):
+                """Check if a TCP port is open."""
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(timeout)
+                    result = sock.connect_ex((ip, port))
+                    sock.close()
+                    return result == 0
+                except Exception:
+                    return False
+
+            # Define a function to check ICMP connectivity (ping)
+            def check_icmp(ip, timeout=2):
+                """Check if a host responds to ICMP echo (ping)."""
+                try:
+                    # Create a raw socket for ICMP
+                    if hasattr(socket, "IPPROTO_ICMP"):
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
+                        sock.settimeout(timeout)
+                        sock.connect((ip, 0))
+                        sock.send(b'\x08\x00\x00\x00\x00\x01\x00\x01')  # ICMP echo request
+                        sock.recv(1024)
+                        sock.close()
+                        return True
+                except (socket.error, OSError, PermissionError):
+                    # ICMP requires root privileges on most systems
+                    # If it fails, we'll fall back to TCP checks
+                    return False
+
+                return False
+
+            # Run the connectivity checks in a thread pool to avoid blocking
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                # Try common ports: 80 (HTTP), 443 (HTTPS), 22 (SSH), 7 (Echo)
+                common_ports = [80, 443, 22, 7]
+                tcp_futures = [executor.submit(check_tcp_port, device.ip, port) for port in common_ports]
+
+                # Try ICMP ping if possible
+                icmp_future = executor.submit(check_icmp, device.ip)
+
+                # Check if any of the connectivity tests succeeded
+                is_reachable = icmp_future.result()
+                if not is_reachable:
+                    for future in tcp_futures:
+                        if future.result():
+                            is_reachable = True
+                            break
+
+            if is_reachable:
+                _LOGGER.debug("Device %s is reachable", device.name)
+                device.online = True
+                device.first_offline = None
+                device.verification_attempts = 0
+                # Improve reliability score
+                device.reliability_score = min(100, device.reliability_score + 2)
+
+                # We still need to update device data from Bettercap
+                device_data = await self._async_fetch_device_data()
+                if device_data and device.mac_address in device_data:
+                    device.update_from_data(device_data[device.mac_address])
+
+                # Signal device update
+                async_dispatcher_send(self._hass, signal_device_update(device.mac_address), True)
+                return
+            else:
+                _LOGGER.debug("Device %s is not reachable", device.name)
+        except Exception as ex:
+            _LOGGER.warning("Error during connectivity verification for %s: %s", device.name, ex)
+
+        # If we get here, verification failed
+        _LOGGER.debug("Device %s failed verification attempt %d", device.name, device.verification_attempts)
+
     async def _async_scheduled_reverification(self, *_):
         """Periodically try to rediscover offline devices."""
         _LOGGER.debug("Running scheduled reverification of offline devices")
@@ -659,299 +755,395 @@ class NetworkDeviceScanner:
                 # Try to rediscover the device
                 _LOGGER.debug("Attempting to rediscover offline device: %s", device.name)
                 await self._verify_device_connectivity(device)
-    
-    async def _async_process_device_data(self, fetched_devices: dict[str, Any]) -> None:
+
+    async def _async_process_device_data(self, fetched_devices: dict[str, Any]) -> set[str]:
         """Process fetched device data and update entities."""
-        current_devices = {}
-        now = dt_util.now()
-        registry = er.async_get(self._hass)
+        found_macs = set()
+
+        _LOGGER.debug("Processing %d devices from Bettercap", len(fetched_devices))
 
         for mac_address, raw_device_data in fetched_devices.items():
             formatted_mac = format_mac(mac_address)
-            if formatted_mac is None:  # Invalid MAC Address
+            if formatted_mac is None: # Invalid MAC Address
                 _LOGGER.warning("Invalid MAC address found: %s", mac_address)
                 continue
 
-            # First check if this MAC is already tracked by another integration
-            existing_entity = self._existing_mac_entities.get(formatted_mac)
-            if existing_entity and existing_entity["config_entry_id"] != self._entry.entry_id:
-                # This MAC is tracked by another integration, update the entity registry
-                # to associate it with this integration instead
-                _LOGGER.info(
-                    "Found existing device_tracker entity %s for MAC %s, updating to use this integration",
-                    existing_entity["entity_id"], formatted_mac
+            name = raw_device_data.get("name", "")
+            ip = raw_device_data.get("ip", "")
+            vendor = raw_device_data.get("vendor", "")
+
+            _LOGGER.debug("Processing device: MAC=%s, Name=%s, IP=%s, Vendor=%s", formatted_mac, name, ip, vendor)
+
+            # Check if this is a new device
+            if formatted_mac not in self._devices:
+                # Create a new device
+                device = NetworkDevice(formatted_mac)
+                self._devices[formatted_mac] = device
+                _LOGGER.debug("Discovered new device: %s", formatted_mac)
+
+                # Signal new device
+                async_dispatcher_send(
+                    self._hass,
+                    f"{DOMAIN}_device_new_{self._entry.entry_id}",
+                    formatted_mac,
                 )
 
-                # Only update the entity if it's not disabled
-                if not existing_entity["disabled"]:
-                    try:
-                        # Update the entity to use this integration
-                        registry.async_update_entity(
-                            entity_id=existing_entity["entity_id"],
-                            config_entry_id=self._entry.entry_id,
-                            # Keep the original unique_id to maintain entity history
-                            new_unique_id=f"{DOMAIN}_{formatted_mac}"
-                        )
-                        # Add to known MAC addresses
-                        self._known_mac_addresses[formatted_mac] = existing_entity["entity_id"].split(".", 1)[1]
-                    except Exception as ex:
-                        _LOGGER.error("Error updating entity registry for %s: %s", formatted_mac, ex)
+            # Get the device from our devices dictionary
+            device = self._devices[formatted_mac]
 
-            # If no MAC match, check if hostname matches an existing entity
-            elif raw_device_data.get("name"):
-                hostname = raw_device_data["name"].lower()
-                existing_entity = self._existing_hostname_entities.get(hostname)
+            # Update device data
+            device.update_from_data(raw_device_data)
 
-                if existing_entity and existing_entity["config_entry_id"] != self._entry.entry_id:
-                    _LOGGER.info(
-                        "Found existing device_tracker entity %s with matching hostname %s, updating to use this integration",
-                        existing_entity["entity_id"], hostname
-                    )
+            # Explicitly mark as online and reset offline tracking
+            device.online = True
+            device.first_offline = None
+            device.verification_attempts = 0
 
-                    # Only update the entity if it's not disabled
-                    if not existing_entity["disabled"]:
-                        try:
-                            # Update the entity to use this integration
-                            registry.async_update_entity(
-                                entity_id=existing_entity["entity_id"],
-                                config_entry_id=self._entry.entry_id,
-                                # Use the new MAC address with our domain prefix
-                                new_unique_id=f"{DOMAIN}_{formatted_mac}"
-                            )
-                            # Add to known MAC addresses
-                            self._known_mac_addresses[formatted_mac] = existing_entity["entity_id"].split(".", 1)[1]
-                        except Exception as ex:
-                            _LOGGER.error("Error updating entity registry for hostname %s: %s", hostname, ex)
+            # Signal device update (online)
+            async_dispatcher_send(self._hass, signal_device_update(formatted_mac), True)
 
-            # Check if this device is managed by this config entry
-            if (
-                self._entry.entry_id
-                != self._known_mac_addresses.get(
-                    formatted_mac, self._entry.entry_id
-                )  # Using entity registry to track ownership, fallback to entry_id for new entities.
-            ):
-                # If auto-rename is enabled, we might still want to update the entity
-                # even if it's not managed by this config entry
-                if self._auto_rename_friendly or self._auto_rename_entity:
-                    await self._try_rename_existing_entity(formatted_mac, raw_device_data)
-                continue  # Device is not managed by this config entry
+            # Add to found MACs
+            found_macs.add(formatted_mac)
 
-            device = self._devices.get(formatted_mac)
-            if device is None:
-                # New device found, create a NetworkDevice instance but don't add it to _devices yet
-                device = NetworkDevice(formatted_mac)
-                device.update_from_data(raw_device_data)
+            # Try to rename existing entity if needed
+            if self._auto_rename_friendly or self._auto_rename_entity:
+                await self._try_rename_existing_entity(formatted_mac, raw_device_data)
 
-                # Check if the device is online and has enough information
-                if device.online and device.name and device.ip:
-                    self._devices[formatted_mac] = (
-                        device  # Add to _devices only if it's online and has basic info
-                    )
-                    async_dispatcher_send(
-                        self._hass,
-                        f"{DOMAIN}_device_new_{self._entry.entry_id}",
-                        formatted_mac,
-                    )  # Signal new device
-            else:
-                # Existing device, update its information
-                device.update_from_data(raw_device_data)
-
-            current_devices[formatted_mac] = device
-            # Make sure the device exists in _devices before sending update
-            if formatted_mac in self._devices:
-                async_dispatcher_send(
-                    self._hass, signal_device_update(formatted_mac), device.online
-                )  # Signal device update
-
-        await self._async_process_device_offline(current_devices, now)
+        return found_macs
 
     def _generate_better_name(self, device: NetworkDevice) -> tuple[str, bool]:
         """Generate a better name for a device based on available information.
-        
+
         Returns:
             tuple: (better_name, is_significant_improvement)
         """
         current_name = device.name or f"Device {device.mac_address[-4:]}"
-        
-        # Check if we have a hostname
+
+        # First priority: Use the device_friendly_name from mDNS if available
+        if device.device_friendly_name and len(device.device_friendly_name) > 1:
+            if device.vendor and len(device.vendor) > 1:
+                better_name = f"{device.device_friendly_name} ({device.vendor})"
+                return better_name, True
+            return device.device_friendly_name, True
+
+        # Second priority: Use hostname
         if device.name and len(device.name) > 1 and not device.name.startswith("Device "):
-            # We have a good hostname
-            
+            # Clean up the hostname - remove .local suffix
+            hostname = device.name
+            if hostname.endswith(".local"):
+                hostname = hostname[:-6] # Remove .local
+            # Note: Trailing dots are already removed when the device is created
+
+            # If it's a UUID-like hostname and we have a device model, use that instead
+            if (len(hostname) > 30 and "-" in hostname) or hostname.startswith("Android-"):
+                if device.device_model:
+                    if device.vendor and len(device.vendor) > 1:
+                        better_name = f"{device.device_model} ({device.vendor})"
+                    else:
+                        better_name = device.device_model
+                    return better_name, True
+
             # If we also have vendor information, include it
             if device.vendor and len(device.vendor) > 1:
-                better_name = f"{device.name} ({device.vendor})"
+                better_name = f"{hostname} ({device.vendor})"
                 return better_name, True
-            
+
             # Just the hostname is still good
-            return device.name, True
-            
-        # If we have vendor but no good hostname
+            return hostname, True
+
+        # Third priority: Use device model with vendor
+        if device.device_model and len(device.device_model) > 1:
+            if device.vendor and len(device.vendor) > 1:
+                better_name = f"{device.device_model} ({device.vendor})"
+            else:
+                better_name = device.device_model
+            return better_name, True
+
+        # Fourth priority: If we have vendor but no good hostname
         if device.vendor and len(device.vendor) > 1:
             better_name = f"{device.vendor} {device.mac_address[-4:]}"
             return better_name, True
-            
+
         # No significant improvement possible
         return current_name, False
-        
+
     async def _async_mark_missing_devices_as_not_home(self):
         """Mark devices not found in the first scan as not_home."""
         now = dt_util.now()
         for mac_address, original_name in self._known_mac_addresses.items():
-            if mac_address in self._devices:  # Already tracked in first scan
+            if mac_address in self._devices:                       # Already tracked in first scan
                 continue
             device = NetworkDevice(mac_address)
             device.name = original_name
-            device.first_offline = now  # Mark first offline time
+            device.first_offline = now                             # Mark first offline time
             self._devices[mac_address] = device
             async_dispatcher_send(
                 self._hass,
                 f"{DOMAIN}_device_missing_{self._entry.entry_id}",
                 mac_address,
-            )  # Signal device missing
+            )                                                      # Signal device missing
+
+    def _determine_source_and_icon(self, device_data: dict[str, Any]) -> tuple[str, str]:
+        """Determine the source type and icon based on device data."""
+        # Default values
+        source = "bettercap"
+        icon = "mdi:lan-connect"
+
+        # Safety check for None
+        if device_data is None:
+            return source, icon
+
+        # Get device type if available
+        device_type = device_data.get("device_type")
+
+        # Check if device has wireless data
+        if device_data.get("is_wireless") or device_data.get("rssi") or device_data.get("2G") or device_data.get("5G"):
+            source = "wifi"
+            icon = "mdi:wifi"
+
+        # Check for Bluetooth devices
+        if device_data.get("meta") and isinstance(device_data["meta"], dict):
+            meta = device_data["meta"]
+            if "bluetooth" in meta or "bt" in meta:
+                source = "bluetooth"
+                icon = "mdi:bluetooth"
+
+        # Check for specific device types based on vendor or other attributes
+        vendor = device_data.get("vendor", "")
+        if vendor:
+            vendor = vendor.lower()
+            if "apple" in vendor or "iphone" in vendor or "ipad" in vendor or "macbook" in vendor:
+                icon = "mdi:apple"
+            elif "google" in vendor or "android" in vendor:
+                icon = "mdi:android"
+            elif "amazon" in vendor or "kindle" in vendor or "echo" in vendor:
+                icon = "mdi:amazon"
+            elif "microsoft" in vendor or "windows" in vendor or "xbox" in vendor:
+                icon = "mdi:microsoft"
+            elif "samsung" in vendor:
+                icon = "mdi:cellphone"
+            elif "sonos" in vendor:
+                icon = "mdi:speaker"
+            elif "philips" in vendor or "hue" in vendor:
+                icon = "mdi:lightbulb"
+            elif "xiaomi" in vendor:
+                icon = "mdi:xiaomi"
+            elif "espressif" in vendor:
+                icon = "mdi:chip"
+            elif "raspberry" in vendor:
+                icon = "mdi:raspberry-pi"
+            elif "asus" in vendor:
+                icon = "mdi:router-network"
+
+        # Override based on device type if available
+        if device_type == "cast":
+            source = "cast"
+            icon = "mdi:cast"
+        elif device_type == "esphome":
+            source = "esphome"
+            icon = "mdi:chip"
+        elif device_type == "homekit":
+            source = "homekit"
+            icon = "mdi:home-automation"
+        elif device_type == "android_tv":
+            source = "android_tv"
+            icon = "mdi:android-tv"
+
+        return source, icon
+
+    async def _update_existing_device_tracker(self, entity_id: str, mac_address: str, device_data: dict[str, Any]) -> None:
+        """Update an existing device_tracker entity with new data."""
+        try:
+            # Get current state and attributes
+            state = self._hass.states.get(entity_id)
+            if not state:
+                _LOGGER.warning("Cannot update entity %s: state not found", entity_id)
+                return
+
+            # Determine if device is online
+            is_online = device_data.get("online", True)
+            new_state = "home" if is_online else "not_home"
+
+            # Get hostname/name
+            hostname = device_data.get("name", "")
+            if not hostname and "host_name" in state.attributes:
+                hostname = state.attributes["host_name"]
+            elif not hostname and "hostname" in state.attributes:
+                hostname = state.attributes["hostname"]
+
+            # Generate a better name if possible
+            better_name = hostname
+            if hasattr(self, "_generate_better_name") and device_data.get("name"):
+                temp_device = NetworkDevice(mac_address)
+                temp_device.update_from_data(device_data)
+                better_name, _ = self._generate_better_name(temp_device)
+
+            # Determine source type and icon
+            source, icon = self._determine_source_and_icon(device_data)
+
+            # Prepare attributes to update
+            attributes = dict(state.attributes)
+
+            # Always update these core attributes
+            attributes["source_type"] = source
+            attributes["mac"] = mac_address
+            attributes["icon"] = icon
+
+            if device_data.get("ip"):
+                attributes["ip"] = device_data["ip"]
+
+            if hostname:
+                attributes["host_name"] = hostname
+
+            if better_name:
+                attributes["friendly_name"] = better_name
+
+            # Add last_time_reachable if device is online
+            if is_online:
+                attributes["last_time_reachable"] = dt_util.now().isoformat()
+
+            # Add vendor information if available
+            if device_data.get("vendor"):
+                attributes["vendor"] = device_data["vendor"]
+
+            # Update the entity state
+            self._hass.states.async_set(entity_id, new_state, attributes)
+
+            _LOGGER.debug("Updated existing entity %s with new data", entity_id)
+
+        except Exception as ex:
+            _LOGGER.error("Error updating existing entity %s: %s", entity_id, ex)
 
     async def _try_rename_existing_entity(self, mac_address: str, device_data: dict[str, Any]) -> None:
         """Try to rename an existing entity if better information is available."""
         registry = er.async_get(self._hass)
-        
+
         # Check if this MAC address has an existing entity
         existing_entity = self._existing_mac_entities.get(mac_address)
         if not existing_entity:
             return
-            
+
         # Create a temporary device object to use our naming logic
         temp_device = NetworkDevice(mac_address)
         temp_device.update_from_data(device_data)
-        
+
         # Generate a better name
         better_name, is_significant = self._generate_better_name(temp_device)
         if not is_significant:
             return
-            
+
         entity_id = existing_entity["entity_id"]
-        _LOGGER.debug(
-            "Found better name '%s' for existing entity %s (MAC: %s)", 
-            better_name, entity_id, mac_address
-        )
-        
+        _LOGGER.debug("Found better name '%s' for existing entity %s (MAC: %s)", better_name, entity_id, mac_address)
+
         try:
             # Get the current entity state
             state = self._hass.states.get(entity_id)
             if not state:
                 return
-                
+
             current_name = state.name
-            
+
             # Check if the current name is already good
             if current_name and len(current_name) > 1 and ":" not in current_name and "-" not in current_name:
                 # Current name seems good, only replace if we have a hostname and vendor
                 if not (temp_device.name and temp_device.vendor):
                     return
-            
+
             # Update friendly name if enabled
             if self._auto_rename_friendly:
-                _LOGGER.info(
-                    "Renaming entity %s friendly name from '%s' to '%s'", 
-                    entity_id, current_name, better_name
-                )
-                
+                _LOGGER.info("Renaming entity %s friendly name from '%s' to '%s'", entity_id, current_name, better_name)
+
                 # Update the friendly name via service call
-                await self._hass.services.async_call(
-                    "homeassistant", "update_entity_attributes",
-                    {
-                        "entity_id": entity_id,
-                        "friendly_name": better_name
-                    },
-                    blocking=True
-                )
-            
+                await self._hass.services.async_call("homeassistant",
+                                                     "update_entity", {"entity_id": entity_id, "name": better_name},
+                                                     blocking=True)
+
             # Update entity ID if enabled
             if self._auto_rename_entity and temp_device.name:
+                # Clean up the name for entity ID - only use the base hostname
+                clean_name = temp_device.name
+
+                # Remove .local suffix and trailing dots
+                if clean_name.endswith(".local"):
+                    clean_name = clean_name[:-6] # Remove .local
+                while clean_name and clean_name.endswith("."):
+                    clean_name = clean_name[:-1] # Remove trailing dot
+
+                # Remove any vendor information that might be in parentheses
+                if "(" in clean_name:
+                    clean_name = clean_name.split("(")[0].strip()
+
+                # For device names with hyphens like "YLBulbColor1s-71CB", keep only the main part
+                if "-" in clean_name:
+                    parts = clean_name.split("-")
+                    # If the last part looks like a MAC suffix or ID (alphanumeric and 4-6 chars)
+                    if len(parts) > 1 and len(parts[-1]) <= 6 and parts[-1].isalnum():
+                        # Keep the device name and the ID part, but not other parts
+                        clean_name = f"{parts[0]}_{parts[-1]}"
+
                 # Generate a valid entity ID from the device name
                 domain = entity_id.split(".", 1)[0]
-                new_entity_id = f"{domain}.{temp_device.name.lower().replace(' ', '_')}"
-                
+                new_entity_id = f"{domain}.{clean_name.lower().replace(' ', '_').replace('-', '_')}"
+
+                # Remove any special characters that aren't allowed in entity IDs
+                import re
+                new_entity_id = re.sub(r'[^a-z0-9_]+', '_', new_entity_id)
+
                 # Check if this entity ID already exists
                 if new_entity_id != entity_id and not self._hass.states.get(new_entity_id):
-                    _LOGGER.info(
-                        "Renaming entity ID from %s to %s", 
-                        entity_id, new_entity_id
-                    )
-                    
+                    _LOGGER.info("Renaming entity ID from %s to %s", entity_id, new_entity_id)
+
                     # Update the entity ID in the registry
-                    registry.async_update_entity(
-                        entity_id=entity_id,
-                        new_entity_id=new_entity_id
-                    )
-                    
+                    registry.async_update_entity(entity_id=entity_id, new_entity_id=new_entity_id)
+
                     # Update our tracking dictionaries
                     self._existing_mac_entities[mac_address]["entity_id"] = new_entity_id
-                    
+
                     # If this entity is in our known MAC addresses, update that too
                     if mac_address in self._known_mac_addresses:
                         self._known_mac_addresses[mac_address] = new_entity_id.split(".", 1)[1]
-        
+
         except Exception as ex:
             _LOGGER.error("Error renaming entity %s: %s", entity_id, ex)
-    
-    async def _async_process_device_offline(
-        self, current_devices: dict[str, NetworkDevice], now: datetime
-    ):
+
+    async def _async_process_device_offline(self, found_macs: set[str], now: datetime):
         """Process devices that are offline or missing in the current scan."""
         devices_to_remove = []
         for mac_address, device in self._devices.items():
-            if mac_address not in current_devices:  # Device not in current scan
-                if device.online:  # Device was online before, now missing from scan
+            if mac_address not in found_macs:      # Device not in current scan
+                if device.online:                  # Device was online before, now missing from scan
                     if not device.first_offline:
-                        device.first_offline = now  # Mark first offline time
-                        # Reset verification attempts counter
+                        device.first_offline = now # Mark first offline time
+                                                   # Reset verification attempts counter
                         device.verification_attempts = 0
-                    elif (
-                        device.first_offline
-                        + timedelta(seconds=DEVICE_SCAN_INTERVAL * 3)
-                        < now
-                    ):
-                        # Determine max verification attempts based on device reliability
+                    elif (device.first_offline + timedelta(seconds=DEVICE_SCAN_INTERVAL * 3) < now):
+                                                   # Determine max verification attempts based on device reliability
                         if device.reliability_score < 50:
-                            # Less reliable devices get more verification attempts
+                                                   # Less reliable devices get more verification attempts
                             max_verification_attempts = VERIFICATION_ATTEMPTS * 2
                         else:
                             max_verification_attempts = VERIFICATION_ATTEMPTS
-                            
+
                         # Time to actively verify if the device is truly offline
                         if device.verification_attempts < max_verification_attempts:
                             # Increment verification counter
                             device.verification_attempts += 1
                             # Schedule active verification
-                            self._hass.async_create_task(
-                                self._verify_device_connectivity(device)
-                            )
+                            self._hass.async_create_task(self._verify_device_connectivity(device))
                         else:
                             # We've tried verification multiple times, mark as offline
                             device.online = False
                             # Update reliability metrics
                             device.offline_frequency += 1
                             device.reliability_score = max(0, device.reliability_score - 5)
-                            
-                            _LOGGER.debug(
-                                "Device %s (%s) marked offline after %d verification attempts",
-                                device.name, device.mac_address, device.verification_attempts
-                            )
-                            
+
+                            _LOGGER.debug("Device %s (%s) marked offline after %d verification attempts", device.name, device.mac_address, device.verification_attempts)
+
                             # Make sure the device exists in _devices before sending update
                             if mac_address in self._devices:
-                                async_dispatcher_send(
-                                    self._hass, signal_device_update(mac_address), False
-                                )  # Signal offline
-                elif (
-                    not device.online
-                    and device.first_offline
-                    and device.first_offline
-                    + timedelta(seconds=DEVICE_SCAN_INTERVAL * 6)
-                    < now
-                ):  # Remove device after longer offline period
+                                async_dispatcher_send(self._hass, signal_device_update(mac_address), False)                                     # Signal offline
+                elif (not device.online and device.first_offline and device.first_offline + timedelta(seconds=DEVICE_SCAN_INTERVAL * 6) < now): # Remove device after longer offline period
                     devices_to_remove.append(mac_address)
 
         for mac_address in devices_to_remove:
-            self._devices.pop(mac_address)  # Remove devices offline for extended period
-
-
+            self._devices.pop(mac_address) # Remove devices offline for extended period
