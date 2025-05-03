@@ -28,10 +28,10 @@ _LOGGER = logging.getLogger(__name__)
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_HOST): str,
+        vol.Required(CONF_HOST, default="localhost"): str,
         vol.Required(CONF_PORT, default=DEFAULT_PORT): int,
         vol.Optional(CONF_USERNAME, default="user"): str,
-        vol.Optional(CONF_PASSWORD, default=""): str,
+        vol.Optional(CONF_PASSWORD, default="your_secure_password"): str,
         vol.Optional(CONF_API_KEY, default=""): str,
         vol.Required(CONF_ENABLE_NET_PROBE, default=DEFAULT_ENABLE_NET_PROBE): bool,
         vol.Required(CONF_ENABLE_NET_SNIFF, default=DEFAULT_ENABLE_NET_SNIFF): bool,
@@ -39,8 +39,6 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
         vol.Required(CONF_ENABLE_TICKER, default=DEFAULT_ENABLE_TICKER): bool,
         vol.Required(CONF_ENABLE_NET_RECON, default=DEFAULT_ENABLE_NET_RECON): bool,
         vol.Required(CONF_ENABLE_ZEROGOD, default=DEFAULT_ENABLE_ZEROGOD): bool,
-        vol.Required(CONF_AUTO_RENAME_FRIENDLY, default=DEFAULT_AUTO_RENAME_FRIENDLY): bool,
-        vol.Required(CONF_AUTO_RENAME_ENTITY, default=DEFAULT_AUTO_RENAME_ENTITY): bool,
     }
 )
 
