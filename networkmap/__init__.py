@@ -51,8 +51,7 @@ from .const import (
     BETTERCAP_NET_RECON_OFF,
     BETTERCAP_NET_SHOW_META_ON,
     BETTERCAP_ZEROGOD_DISCOVERY_ON,
-    BETTERCAP_ZEROGOD_DISCOVERY_OFF,
-    VERIFICATION_ATTEMPTS
+    BETTERCAP_ZEROGOD_DISCOVERY_OFF
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -115,9 +114,6 @@ class NetworkDevice:
         self.last_seen: str | None = None
         self.is_wireless: bool = False
         self.first_offline: datetime | None = None
-        self.verification_attempts: int = 0
-        self.reliability_score: int = 100 # Start with perfect score
-        self.offline_frequency: int = 0   # Track how often device goes offline
 
         # Entity tracking
         self.entity_created: bool = False  # Whether an entity has been created for this device
@@ -259,7 +255,6 @@ class NetworkDeviceScanner:
         if self._config.get(CONF_API_KEY):
             self._headers = {"X-API-KEY": self._config[CONF_API_KEY]}
         self._unsub_interval_scan = None
-        self._finished_first_scan = False
         self._known_mac_addresses: dict[str, str] = {}
         self._existing_mac_entities: dict[str, dict] = {}
         self._existing_hostname_entities: dict[str, dict] = {}
@@ -290,69 +285,6 @@ class NetworkDeviceScanner:
         if not aiooui.is_loaded():
             await aiooui.async_load()
 
-        # Get entity registry to find existing device_tracker entities
-        registry = er.async_get(self._hass)
-
-        # Get entities for this config entry
-        self._known_mac_addresses = {
-            entry.unique_id: entry.original_name
-            for entry in registry.entities.get_entries_for_config_entry_id(self._entry.entry_id)}
-
-        # Find all device_tracker entities in the system to check for MAC address and hostname matches
-        self._existing_mac_entities = {}
-        self._existing_hostname_entities = {}
-
-        # First pass: collect all device_tracker entities
-        all_device_trackers = {}
-        for entity_id, entity in registry.entities.items():
-            if entity.domain == "device_tracker":
-                all_device_trackers[entity_id] = {
-                    "entity_id": entity_id, "config_entry_id": entity.config_entry_id, "disabled": entity.disabled,
-                    "unique_id": entity.unique_id, "original_name": entity.original_name}
-
-        # Second pass: check for MAC addresses in unique_ids and attributes
-        for entity_id, entity_data in all_device_trackers.items():
-            # Check if unique_id contains a MAC address
-            if entity_data["unique_id"] and ":" in entity_data["unique_id"]:
-                mac_parts = entity_data["unique_id"].split("_")
-                for part in mac_parts:
-                    if ":" in part and len(part) >= 17: # MAC addresses are at least 17 chars with colons
-                        self._existing_mac_entities[format_mac(part)] = entity_data
-
-            # Store by hostname (entity ID without domain) for later matching
-            hostname = entity_id.split(".", 1)[1]
-            self._existing_hostname_entities[hostname.lower()] = entity_data
-
-            # Also store by original name if available
-            if entity_data["original_name"]:
-                self._existing_hostname_entities[entity_data["original_name"].lower()] = entity_data
-
-        # Third pass: check entity attributes for MAC addresses
-        for entity_id in all_device_trackers:
-            try:
-                state = self._hass.states.get(entity_id)
-                if state and state.attributes:
-                    # Check for mac_address attribute
-                    if "mac_address" in state.attributes:
-                        mac = format_mac(state.attributes["mac_address"])
-                        if mac:
-                            self._existing_mac_entities[mac] = all_device_trackers[entity_id]
-
-                    # Check for MAC in other common attribute names
-                    for attr_name in ["mac", "MAC", "hw_addr", "hardware_address"]:
-                        if attr_name in state.attributes:
-                            mac = format_mac(state.attributes[attr_name])
-                            if mac:
-                                self._existing_mac_entities[mac] = all_device_trackers[entity_id]
-
-                    # Store hostname from attributes for matching
-                    for attr_name in ["hostname", "host_name", "name"]:
-                        if attr_name in state.attributes and state.attributes[attr_name]:
-                            hostname = state.attributes[attr_name].lower()
-                            self._existing_hostname_entities[hostname] = all_device_trackers[entity_id]
-            except Exception as ex:
-                _LOGGER.warning("Error checking attributes for %s: %s", entity_id, ex)
-
         if self._hass.state == CoreState.running:
             await self._async_start_scanner()
         else:
@@ -368,12 +300,6 @@ class NetworkDeviceScanner:
             self._scan_interval,
         )
 
-        # Also start a periodic reverification of offline devices
-        self._unsub_reverify = async_track_time_interval(
-            self._hass,
-            self._async_scheduled_reverification,
-            timedelta(minutes=15),                        # Try to rediscover offline devices every 15 minutes
-        )
 
     async def _enable_modules(self) -> None:
         """Enable the appropriate Bettercap modules based on configuration."""
@@ -416,9 +342,6 @@ class NetworkDeviceScanner:
             self._unsub_interval_scan()
             self._unsub_interval_scan = None
 
-        if hasattr(self, '_unsub_reverify') and self._unsub_reverify:
-            self._unsub_reverify()
-            self._unsub_reverify = None
 
         # Disable modules when shutting down
         modules_to_disable = []
@@ -565,104 +488,7 @@ class NetworkDeviceScanner:
                 found_macs = await self._async_process_device_data(device_data)
                 await self._async_process_device_offline(found_macs, now)
 
-        if not self._finished_first_scan:
-            self._finished_first_scan = True
-            await self._async_mark_missing_devices_as_not_home()
 
-    async def _verify_device_connectivity(self, device: NetworkDevice) -> None:
-        """Actively verify if a device is still connected to the network using socket connection."""
-        if not device.ip:
-            _LOGGER.debug("Cannot verify device %s: no IP address", device.mac_address)
-            return
-
-        _LOGGER.info("Actively verifying connectivity for %s (%s) - attempt %d/%d", device.name, device.ip, device.verification_attempts, VERIFICATION_ATTEMPTS)
-
-        try:
-            # Use Python's socket module for TCP and ICMP ping
-            import socket
-            from concurrent.futures import ThreadPoolExecutor
-
-            # Define a function to check TCP connectivity
-            def check_tcp_port(ip, port, timeout=1):
-                """Check if a TCP port is open."""
-                try:
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.settimeout(timeout)
-                    result = sock.connect_ex((ip, port))
-                    sock.close()
-                    return result == 0
-                except Exception:
-                    return False
-
-            # Define a function to check ICMP connectivity (ping)
-            def check_icmp(ip, timeout=2):
-                """Check if a host responds to ICMP echo (ping)."""
-                try:
-                    # Create a raw socket for ICMP
-                    if hasattr(socket, "IPPROTO_ICMP"):
-                        sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
-                        sock.settimeout(timeout)
-                        sock.connect((ip, 0))
-                        sock.send(b'\x08\x00\x00\x00\x00\x01\x00\x01')  # ICMP echo request
-                        sock.recv(1024)
-                        sock.close()
-                        return True
-                except (socket.error, OSError, PermissionError):
-                    # ICMP requires root privileges on most systems
-                    # If it fails, we'll fall back to TCP checks
-                    return False
-
-                return False
-
-            # Run the connectivity checks in a thread pool to avoid blocking
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                # Try common ports: 80 (HTTP), 443 (HTTPS), 22 (SSH), 7 (Echo)
-                common_ports = [80, 443, 22, 7]
-                tcp_futures = [executor.submit(check_tcp_port, device.ip, port) for port in common_ports]
-
-                # Try ICMP ping if possible
-                icmp_future = executor.submit(check_icmp, device.ip)
-
-                # Check if any of the connectivity tests succeeded
-                is_reachable = icmp_future.result()
-                if not is_reachable:
-                    for future in tcp_futures:
-                        if future.result():
-                            is_reachable = True
-                            break
-
-            if is_reachable:
-                _LOGGER.debug("Device %s is reachable", device.name)
-                device.online = True
-                device.first_offline = None
-                device.verification_attempts = 0
-                # Improve reliability score
-                device.reliability_score = min(100, device.reliability_score + 2)
-
-                # We still need to update device data from Bettercap
-                device_data = await self._async_fetch_device_data()
-                if device_data and device.mac_address in device_data:
-                    device.update_from_data(device_data[device.mac_address])
-
-                # Signal device update
-                async_dispatcher_send(self._hass, signal_device_update(device.mac_address), True)
-                return
-            else:
-                _LOGGER.debug("Device %s is not reachable", device.name)
-        except Exception as ex:
-            _LOGGER.warning("Error during connectivity verification for %s: %s", device.name, ex)
-
-        # If we get here, verification failed
-        _LOGGER.debug("Device %s failed verification attempt %d", device.name, device.verification_attempts)
-
-    async def _async_scheduled_reverification(self, *_):
-        """Periodically try to rediscover offline devices."""
-        _LOGGER.debug("Running scheduled reverification of offline devices")
-        for mac_address, device in self._devices.items():
-            if not device.online and device.ip:
-                # Try to rediscover the device
-                _LOGGER.debug("Attempting to rediscover offline device: %s", device.name)
-                await self._verify_device_connectivity(device)
 
     async def _async_process_device_data(self, fetched_devices: dict[str, Any]) -> set[str]:
         """Process fetched device data and update entities."""
@@ -707,7 +533,6 @@ class NetworkDeviceScanner:
             # Explicitly mark as online and reset offline tracking
             device.online = True
             device.first_offline = None
-            device.verification_attempts = 0
 
             # Signal device update (online) only if entity already exists
             if device.entity_created:
@@ -715,9 +540,6 @@ class NetworkDeviceScanner:
 
             # Add to found MACs
             found_macs.add(formatted_mac)
-
-            # Try to update existing entity if better info is available
-            await self._try_update_existing_entity(formatted_mac, raw_device_data)
 
         # Process pending devices that might be ready for entity creation
         await self._process_pending_devices()
@@ -972,152 +794,7 @@ class NetworkDeviceScanner:
 
         return source, icon
 
-    async def _update_existing_device_tracker(self, entity_id: str, mac_address: str, device_data: dict[str, Any]) -> None:
-        """Update an existing device_tracker entity with new data."""
-        try:
-            # Get current state and attributes
-            state = self._hass.states.get(entity_id)
-            if not state:
-                _LOGGER.warning("Cannot update entity %s: state not found", entity_id)
-                return
 
-            # Determine if device is online
-            is_online = device_data.get("online", True)
-            new_state = "home" if is_online else "not_home"
-
-            # Get hostname/name
-            hostname = device_data.get("name", "")
-            if not hostname and "host_name" in state.attributes:
-                hostname = state.attributes["host_name"]
-            elif not hostname and "hostname" in state.attributes:
-                hostname = state.attributes["hostname"]
-
-            # Generate a better name if possible
-            better_name = hostname
-            if hasattr(self, "_generate_better_name") and device_data.get("name"):
-                temp_device = NetworkDevice(mac_address)
-                temp_device.update_from_data(device_data)
-                better_name, _ = self._generate_better_name(temp_device)
-
-            # Determine source type and icon
-            source, icon = self._determine_source_and_icon(device_data)
-
-            # Prepare attributes to update
-            attributes = dict(state.attributes)
-
-            # Always update these core attributes
-            attributes["source_type"] = source
-            attributes["mac"] = mac_address
-            attributes["icon"] = icon
-
-            if device_data.get("ip"):
-                attributes["ip"] = device_data["ip"]
-
-            if hostname:
-                attributes["host_name"] = hostname
-
-            if better_name:
-                attributes["friendly_name"] = better_name
-
-            # Add last_time_reachable if device is online
-            if is_online:
-                attributes["last_time_reachable"] = dt_util.now().isoformat()
-
-            # Add vendor information if available
-            if device_data.get("vendor"):
-                attributes["vendor"] = device_data["vendor"]
-
-            # Update the entity state
-            self._hass.states.async_set(entity_id, new_state, attributes)
-
-            _LOGGER.debug("Updated existing entity %s with new data", entity_id)
-
-        except Exception as ex:
-            _LOGGER.error("Error updating existing entity %s: %s", entity_id, ex)
-
-    async def _try_update_existing_entity(self, mac_address: str, device_data: dict[str, Any]) -> None:
-        """Update an existing entity if better information is available, unless manually changed."""
-        registry = er.async_get(self._hass)
-
-        # Check if this MAC address has an existing entity
-        existing_entity = self._existing_mac_entities.get(mac_address)
-        if not existing_entity:
-            # Also check if we have a device with the same hostname but different MAC
-            hostname = device_data.get("name", "").lower()
-            if hostname and hostname in self._existing_hostname_entities:
-                existing_entity = self._existing_hostname_entities[hostname]
-                _LOGGER.debug("Found entity with matching hostname %s but different MAC", hostname)
-
-        if not existing_entity:
-            return
-
-        # Create a temporary device object to use our naming logic
-        temp_device = NetworkDevice(mac_address)
-        temp_device.update_from_data(device_data)
-
-        # Generate a better name
-        better_name, is_significant = self._generate_better_name(temp_device)
-        if not is_significant:
-            return
-
-        entity_id = existing_entity["entity_id"]
-        _LOGGER.debug("Found better info for existing entity %s (MAC: %s)", entity_id, mac_address)
-
-        try:
-            # Get the current entity state
-            state = self._hass.states.get(entity_id)
-            if not state:
-                return
-
-            current_name = state.name
-
-            # Check if the entity has a customized name (manually changed)
-            entity_entry = registry.async_get(entity_id)
-            has_custom_name = entity_entry and entity_entry.name is not None
-
-            # Only update if the name wasn't manually customized
-            if not has_custom_name:
-                # Check if the current name is generic or less informative
-                should_update_name = False
-
-                # Update if current name is generic or contains MAC-like patterns
-                if (not current_name or
-                    current_name.startswith("Device ") or
-                    current_name.startswith("Unknown ") or
-                    ":" in current_name or
-                    (len(current_name) < len(better_name) and temp_device.vendor)):
-                    should_update_name = True
-
-                # If the current name doesn't have vendor info but new one does
-                if (temp_device.vendor and
-                    "(" not in current_name and
-                    temp_device.vendor.lower() not in current_name.lower()):
-                    should_update_name = True
-
-                if should_update_name:
-                    _LOGGER.info("Updating entity %s name from '%s' to '%s'", entity_id, current_name, better_name)
-
-                    # Update the friendly name via service call
-                    await self._hass.services.async_call(
-                        "homeassistant",
-                        "update_entity",
-                        {"entity_id": entity_id, "name": better_name},
-                        blocking=True
-                    )
-            else:
-                _LOGGER.debug("Not updating entity %s name because it was manually customized", entity_id)
-
-            # Always update other attributes with new information
-            await self._update_existing_device_tracker(entity_id, mac_address, device_data)
-
-            # If the entity is from a different integration but represents the same device,
-            # we should update our internal tracking to include this MAC address
-            if mac_address not in self._known_mac_addresses:
-                self._known_mac_addresses[mac_address] = entity_id.split(".", 1)[1]
-                _LOGGER.debug("Added MAC %s to known addresses for entity %s", mac_address, entity_id)
-
-        except Exception as ex:
-            _LOGGER.error("Error updating entity %s: %s", entity_id, ex)
 
     async def _async_process_device_offline(self, found_macs: set[str], now: datetime):
         """Process devices that are offline or missing in the current scan."""
@@ -1127,35 +804,16 @@ class NetworkDeviceScanner:
                 if device.online:                  # Device was online before, now missing from scan
                     if not device.first_offline:
                         device.first_offline = now # Mark first offline time
-                                                   # Reset verification attempts counter
-                        device.verification_attempts = 0
-                    elif (device.first_offline + timedelta(seconds=DEVICE_SCAN_INTERVAL * 3) < now):
-                                                   # Determine max verification attempts based on device reliability
-                        if device.reliability_score < 50:
-                                                   # Less reliable devices get more verification attempts
-                            max_verification_attempts = VERIFICATION_ATTEMPTS * 2
-                        else:
-                            max_verification_attempts = VERIFICATION_ATTEMPTS
 
-                        # Time to actively verify if the device is truly offline
-                        if device.verification_attempts < max_verification_attempts:
-                            # Increment verification counter
-                            device.verification_attempts += 1
-                            # Schedule active verification
-                            self._hass.async_create_task(self._verify_device_connectivity(device))
-                        else:
-                            # We've tried verification multiple times, mark as offline
-                            device.online = False
-                            # Update reliability metrics
-                            device.offline_frequency += 1
-                            device.reliability_score = max(0, device.reliability_score - 5)
+                    # Simply mark as offline immediately
+                    device.online = False
+                    _LOGGER.debug("Device %s (%s) marked offline", device.name, device.mac_address)
 
-                            _LOGGER.debug("Device %s (%s) marked offline after %d verification attempts", device.name, device.mac_address, device.verification_attempts)
-
-                            # Make sure the device exists in _devices before sending update
-                            if mac_address in self._devices:
-                                async_dispatcher_send(self._hass, signal_device_update(mac_address), False)                                     # Signal offline
-                elif (not device.online and device.first_offline and device.first_offline + timedelta(seconds=DEVICE_SCAN_INTERVAL * 6) < now): # Remove device after longer offline period
+                    # Signal device update
+                    async_dispatcher_send(self._hass, signal_device_update(mac_address), False)
+                elif (not device.online and device.first_offline and
+                      device.first_offline + timedelta(seconds=DEVICE_SCAN_INTERVAL * 6) < now):
+                    # Remove device after longer offline period
                     devices_to_remove.append(mac_address)
 
         for mac_address in devices_to_remove:
