@@ -149,12 +149,12 @@ VENDOR_ICONS = {
 }
 
 DEFAULT_ICON = "mdi:lan-connect"
-FIELD_ORDER  = ["device_type", "device_model", "hostname", "vendor"]
+FIELD_ORDER  = ["device_model", "name", "vendor"]
 
 def determine_icon(device_data: Dict[str, str]) -> str:
     """
     1) Try every (icon, keywords) in TYPE_KEYWORDS against
-       device_type → device_model → hostname → vendor.
+       device_model → name → vendor.
     2) If nothing matches, look for a brand in `vendor`.
     3) Else fall back to DEFAULT_ICON.
     """
