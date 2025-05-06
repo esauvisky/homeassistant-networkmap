@@ -163,8 +163,24 @@ class NetworkMapDeviceTrackerEntity(ScannerEntity):
             info["manufacturer"] = self._raw_data["vendor"]
 
         # Add model if available
+        meta = self._raw_data.get("meta", {})
+
+        # Determine model with priority order
+        model = None
         if self._raw_data.get("device_model"):
-            info["model"] = self._raw_data["device_model"]
+            model = self._raw_data["device_model"]
+        elif isinstance(meta, dict) and "mdns:md" in meta:
+            model = meta["mdns:md"]
+        elif (isinstance(meta, dict) and "mdns:platform" in meta
+              and "mdns:board" in meta):
+            model = f"{meta['mdns:platform']} ({meta['mdns:board']})"
+
+        if model:
+            info["model"] = model
+
+        # Add firmware version if available
+        if isinstance(meta, dict) and "mdns:version" in meta:
+            info["sw_version"] = meta["mdns:version"]
 
         return info
 
