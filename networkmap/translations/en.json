@@ -34,5 +34,20 @@
             }
         }
     },
+    "entity": {
+        "sensor": {
+            "vendor": {
+                "name": "Vendor"
+            },
+            "device_model": {
+                "name": "Model"
+            }
+        },
+        "device_tracker": {
+            "device_tracker": {
+                "name": "Presence"
+            }
+        }
+    },
     "title": "Network Map"
 }
