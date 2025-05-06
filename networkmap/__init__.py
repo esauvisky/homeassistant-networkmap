@@ -323,15 +323,15 @@ class NetworkDeviceScanner:
 
                                 # Create the device data dictionary with all metadata
                                 device_data = {
-                                    "name": hostname,
-                                    "ip": host.get("ipv4", ""),
-                                    "vendor": host.get("vendor", ""),
-                                    "online": True,
-                                    "last_seen": host.get("last_seen", ""),
-                                    "first_seen": host.get("first_seen", ""),
+                                    "name": hostname, 
+                                    "ip": host.get("ipv4", ""), 
+                                    "vendor": host.get("vendor", ""), 
+                                    "online": True, 
+                                    "last_seen": host.get("last_seen", ""), 
+                                    "first_seen": host.get("first_seen", ""), 
                                     "meta": meta,
-                                    "device_model": device_model,
-                                    "device_friendly_name": device_friendly_name,
+                                    "device_model": device_model, 
+                                    "device_friendly_name": device_friendly_name, 
                                     "device_type": device_type
                                 }
                                 devices[mac] = device_data

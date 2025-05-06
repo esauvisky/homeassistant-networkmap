@@ -146,3 +146,5 @@ def determine_icon(device_data: dict) -> str:
         icon = "mdi:android-tv"
 
     return icon
+
+

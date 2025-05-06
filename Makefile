@@ -27,7 +27,7 @@ bump-version:
 copy:
 	@echo "Copying files to Home Assistant custom_components directory..."
 	cp ./networkmap /home/emi/Files/HASS/config/custom_components -r
-	rm ~/Files/HASS/config/.storage/networkmap_devices_*
+	rm ~/Files/HASS/config/.storage/networkmap_devices_* || true
 
 # Restart Home Assistant container
 restart:
