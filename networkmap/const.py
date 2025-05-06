@@ -2,11 +2,10 @@
 
 DOMAIN = "networkmap"
 
-PLATFORMS = ["device_tracker"]
+PLATFORMS = ["device_tracker", "sensor"]
 
 DEFAULT_PORT = 8081
 DEFAULT_SCAN_INTERVAL = 30
-DEVICE_SCAN_INTERVAL = 30
 
 CONF_SCAN_INTERVAL = "scan_interval"
 CONF_API_KEY = "api_key"

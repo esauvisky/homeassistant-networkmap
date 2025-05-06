@@ -36,7 +36,6 @@ from .const import (
     PLATFORMS,
     DEFAULT_SCAN_INTERVAL,
     CONF_SCAN_INTERVAL,
-    DEVICE_SCAN_INTERVAL,
     CONF_API_KEY,
     BETTERCAP_API_URL,
     CONF_ENABLE_NET_PROBE,
@@ -286,19 +285,7 @@ class NetworkDeviceScanner:
                                     if ip and ip in session_data["packets"]["Traffic"]:
                                         traffic_data = session_data["packets"]["Traffic"][ip]
 
-                                # Extract signal strength if available
-                                rssi = None
-                                if "rssi" in meta:
-                                    rssi = str(meta.get("rssi"))
-
-                                # Determine frequency band if available
-                                is_2g = False
-                                is_5g = False
-                                if "frequency" in meta:
-                                    freq = meta.get("frequency", 0)
-                                    if isinstance(freq, (int, float)):
-                                        is_2g = freq < 5000
-                                        is_5g = freq >= 5000
+                                # We've removed wireless detection
 
                                 # Extract useful metadata for device identification
                                 device_model = None
@@ -336,12 +323,17 @@ class NetworkDeviceScanner:
 
                                 # Create the device data dictionary with all metadata
                                 device_data = {
-                                    "name": hostname, "ip": host.get("ipv4", ""), "vendor": host.get(
-                                        "vendor", ""), "vendorclass": host.get("vendor", ""), "online": True, "is_wireless": is_wireless, "rssi": rssi, "last_seen": host.get(
-                                            "last_seen", ""), "first_seen": host.get("first_seen", ""), "2G": is_2g, "5G": is_5g, "curTx": str(
-                                                traffic_data.get("Sent", 0)) if traffic_data else None, "curRx": str(
-                                                    traffic_data.get("Received", 0)) if traffic_data else None, "meta": meta,
-                                    "device_model": device_model, "device_friendly_name": device_friendly_name, "device_type": device_type}
+                                    "name": hostname,
+                                    "ip": host.get("ipv4", ""),
+                                    "vendor": host.get("vendor", ""),
+                                    "online": True,
+                                    "last_seen": host.get("last_seen", ""),
+                                    "first_seen": host.get("first_seen", ""),
+                                    "meta": meta,
+                                    "device_model": device_model,
+                                    "device_friendly_name": device_friendly_name,
+                                    "device_type": device_type
+                                }
                                 devices[mac] = device_data
                                 _LOGGER.debug("Found device from session/lan/hosts: %s (%s) - %s",
                                               device_data.get("name"), mac, device_data.get("ip"))
@@ -402,7 +394,7 @@ class NetworkDeviceScanner:
 
                 # Log that we've discovered a new device
                 _LOGGER.info("Discovered new device: %s (%s)",
-                            name or f"Unknown {formatted_mac[-4:]}", formatted_mac)
+                            name or f"Unknown {formatted_mac[-5:]}", formatted_mac)
 
                 # Signal new device discovery
                 async_dispatcher_send(
@@ -460,10 +452,6 @@ class NetworkDeviceScanner:
                         signal_device_offline(self._entry.entry_id),
                         mac_address
                     )
-                elif (not device.online and device.first_offline and
-                      device.first_offline + timedelta(seconds=DEVICE_SCAN_INTERVAL * 6) < now):
-                    # Remove device after longer offline period
-                    devices_to_remove.append(mac_address)
 
         for mac_address in devices_to_remove:
             self._devices.pop(mac_address) # Remove devices offline for extended period
