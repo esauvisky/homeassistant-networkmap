@@ -37,5 +37,3 @@ BETTERCAP_NET_SHOW_META_ON = "set net.show.meta true"
 BETTERCAP_ZEROGOD_DISCOVERY_ON = "zerogod.discovery on"
 BETTERCAP_ZEROGOD_DISCOVERY_OFF = "zerogod.discovery off"
 
-# Verification settings
-VERIFICATION_ATTEMPTS = 2  # Number of verification attempts before marking offline
