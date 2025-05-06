@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Dict, Set
 
 import homeassistant.util.dt as dt_util
 from homeassistant.components.device_tracker import ScannerEntity
@@ -12,7 +12,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from . import NetworkDevice, NetworkDeviceScanner, signal_device_update
+from . import signal_device_new, signal_device_updated, signal_device_offline
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -22,40 +22,65 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     """Set up device tracker for Network Map component."""
-    scanner: NetworkDeviceScanner = hass.data[DOMAIN][entry.entry_id]
     _LOGGER.debug("Setting up device_tracker platform for entry %s", entry.entry_id)
 
+    # Keep track of entities we've created
+    tracked_macs: Set[str] = set()
+    entity_registry: Dict[str, NetworkMapDeviceTrackerEntity] = {}
+
     @callback
-    def device_new(mac_address):
-        """Signal a new device."""
-        device = scanner._devices.get(mac_address)
-        if not device:
-            _LOGGER.warning("Received signal for unknown device: %s", mac_address)
+    def handle_device_new(mac_address: str, device_data: dict[str, Any]):
+        """Handle new device discovery."""
+        if mac_address in tracked_macs:
+            _LOGGER.debug("Device %s already has an entity", mac_address)
             return
 
-        # Mark the device as having an entity
-        device.entity_created = True
+        _LOGGER.info("Adding new device tracker entity: %s", mac_address)
 
-        name = device.name if device else f"Unknown {mac_address[-4:]}"
-        _LOGGER.info("Adding new device tracker entity: %s (%s)", name, mac_address)
-        async_add_entities([NetworkMapDeviceTrackerEntity(scanner, mac_address, True)])
+        # Create new entity
+        entity = NetworkMapDeviceTrackerEntity(entry.entry_id, mac_address, device_data)
+        async_add_entities([entity])
+
+        # Track this entity
+        tracked_macs.add(mac_address)
+        entity_registry[mac_address] = entity
 
     @callback
-    def device_missing(mac_address):
-        """Signal a missing device."""
-        device = scanner._devices.get(mac_address)
-        name = device.name if device else f"Unknown {mac_address[-4:]}"
-        _LOGGER.info("Adding missing device tracker entity: %s (%s)", name, mac_address)
-        async_add_entities([NetworkMapDeviceTrackerEntity(scanner, mac_address, False)])
+    def handle_device_updated(mac_address: str, device_data: dict[str, Any]):
+        """Handle device data updates."""
+        if mac_address not in tracked_macs:
+            # If we get an update for a device we don't have an entity for yet,
+            # create one now
+            handle_device_new(mac_address, device_data)
+            return
+
+        if mac_address in entity_registry:
+            entity = entity_registry[mac_address]
+            entity.async_process_update(device_data)
+
+    @callback
+    def handle_device_offline(mac_address: str):
+        """Handle device going offline."""
+        if mac_address in entity_registry:
+            entity = entity_registry[mac_address]
+            entity.async_mark_offline()
+
+    # Register for all the signals
+    entry.async_on_unload(
+        async_dispatcher_connect(
+            hass, signal_device_new(entry.entry_id), handle_device_new
+        )
+    )
 
     entry.async_on_unload(
         async_dispatcher_connect(
-            hass, f"{DOMAIN}_device_new_{entry.entry_id}", device_new
+            hass, signal_device_updated(entry.entry_id), handle_device_updated
         )
     )
+
     entry.async_on_unload(
         async_dispatcher_connect(
-            hass, f"{DOMAIN}_device_missing_{entry.entry_id}", device_missing
+            hass, signal_device_offline(entry.entry_id), handle_device_offline
         )
     )
 
@@ -67,73 +92,47 @@ class NetworkMapDeviceTrackerEntity(ScannerEntity):
     _attr_translation_key = "device_tracker"
 
     def __init__(
-        self, scanner: NetworkDeviceScanner, mac_address: str, active: bool
+        self, entry_id: str, mac_address: str, device_data: dict[str, Any]
     ) -> None:
         """Initialize the device tracker entity."""
-        self._scanner = scanner
+        self._entry_id = entry_id
         self._mac_address = mac_address
-        self._active = active
+        self._device_data = device_data
+        self._is_connected = True  # Start as connected since we just discovered it
 
-        # Log entity creation with unique ID
-        config_entry_id = scanner._entry.entry_id
-        short_entry_id = config_entry_id.split("-")[0]
-        unique_id = f"{DOMAIN}_{short_entry_id}_{mac_address}"
+        # Extract a short entry ID for the unique_id
+        short_entry_id = entry_id.split("-")[0]
+        self._unique_id = f"{DOMAIN}_{short_entry_id}_{mac_address}"
 
-        device = scanner._devices.get(mac_address)
-        name = device.name if device and device.name else f"Unknown {mac_address[-4:]}"
-
+        # Extract basic info for logging
+        name = device_data.get("name") or f"Unknown {mac_address[-4:]}"
         _LOGGER.debug("Initializing device tracker entity: name=%s, mac=%s, unique_id=%s",
-                     name, mac_address, unique_id)
-
-    @property
-    def _device(self) -> NetworkDevice:
-        """Return NetworkDevice object."""
-        # Safely get the device, returning a default if not found
-        if self._mac_address not in self._scanner._devices:  # pylint: disable=protected-access
-            _LOGGER.warning("Device %s not found in scanner devices", self._mac_address)
-            # Return a default device to prevent KeyError
-            default_device = NetworkDevice(self._mac_address)
-            default_device.name = f"Unknown {self._mac_address[-4:]}"
-            default_device.online = False
-            return default_device
-        return self._scanner._devices[self._mac_address]  # pylint: disable=protected-access
+                     name, mac_address, self._unique_id)
 
     @property
     def unique_id(self) -> str:
         """Return unique ID."""
-        # Add a prefix to ensure uniqueness across different integrations
-        # Also add the config entry ID to ensure uniqueness within the integration
-        config_entry_id = self._scanner._entry.entry_id
-        short_entry_id = config_entry_id.split("-")[0]
-        return f"{DOMAIN}_{short_entry_id}_{self._mac_address}"
+        return self._unique_id
 
     @property
     def name(self) -> str:
         """Return device name."""
-        device = self._device
-        scanner = self._scanner
-
-        # Use the better name generator if available
-        if hasattr(scanner, "_generate_better_name"):
-            better_name, _ = scanner._generate_better_name(device)
-            return better_name
-
-        # Fallback to simple naming
-        if device.name:
-            return device.name
-        return f"Device {self._mac_address[-4:]}"
+        return self._generate_better_name()
 
     @property
     def suggested_object_id(self) -> str:
         """Return a suggested object ID based on the name."""
         # This will be used when the entity is first created
-        # The registry will use this to create the initial entity_id
-        if self._device.name:
-            name = self._device.name
+        name = self._device_data.get("name", "")
 
-            # Remove .local suffix (trailing dots are already removed when the device is created)
+        if name:
+            # Remove .local suffix
             if name.endswith(".local"):
                 name = name[:-6]
+
+            # Remove trailing dots
+            while name and name.endswith("."):
+                name = name[:-1]
 
             # Remove any vendor information
             if "(" in name:
@@ -158,12 +157,12 @@ class NetworkMapDeviceTrackerEntity(ScannerEntity):
     @property
     def is_connected(self) -> bool:
         """Return connection status."""
-        return self._active and self._device.online
+        return self._is_connected
 
     @property
     def ip_address(self) -> str | None:
         """Return IP address of the device."""
-        return self._device.ip
+        return self._device_data.get("ip")
 
     @property
     def mac_address(self) -> str:
@@ -173,130 +172,95 @@ class NetworkMapDeviceTrackerEntity(ScannerEntity):
     @property
     def manufacturer(self) -> str | None:
         """Return manufacturer of the device."""
-        return self._device.vendor
+        return self._device_data.get("vendor")
 
     @property
     def icon(self) -> str:
         """Return the icon to use in the frontend."""
-        try:
-            # Determine icon based on device properties
-            scanner = self._scanner
-            device = self._device
-
-            if hasattr(scanner, "_determine_source_and_icon"):
-                # Create a device_data dict to pass to the method
-                device_data = {
-                    "name": device.name,
-                    "ip": device.ip,
-                    "vendor": device.vendor,
-                    "is_wireless": device.is_wireless,
-                    "rssi": device.rssi,
-                    "2G": device.is_2g,
-                    "5G": device.is_5g,
-                    "meta": {}
-                }
-                _, icon = scanner._determine_source_and_icon(device_data)
-                return icon
-        except Exception as ex:
-            _LOGGER.debug("Error determining icon: %s", ex)
-
-        # Default icon if method not available or error occurs
-        return "mdi:lan-connect"
+        return self._determine_icon()
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return device state attributes."""
-        device = self._device
-        scanner = self._scanner
-
-        # Determine source type
-        source = "Bettercap"
-        if hasattr(scanner, "_determine_source_and_icon"):
-            # Create a device_data dict to pass to the method
-            device_data = {
-                "name": device.name,
-                "ip": device.ip,
-                "vendor": device.vendor,
-                "is_wireless": device.is_wireless,
-                "rssi": device.rssi,
-                "2G": device.is_2g,
-                "5G": device.is_5g,
-                "meta": getattr(device, "meta", {}),
-                "device_type": device.device_type,
-                "device_model": device.device_model,
-                "device_friendly_name": device.device_friendly_name
-            }
-            source, _ = scanner._determine_source_and_icon(device_data)
-
         attributes = {
             # Required attributes that should always be present
-            "source_type": source,
+            "source_type": self._determine_source_type(),
             "mac": self.mac_address,
-            "host_name": device.name or f"device_{self.mac_address[-4:]}",
+            "host_name": self._device_data.get("name") or f"device_{self.mac_address[-4:]}",
         }
 
         # Add IP if available
-        if device.ip:
-            attributes["ip"] = device.ip
+        if self._device_data.get("ip"):
+            attributes["ip"] = self._device_data["ip"]
 
         # Add last_time_reachable if device is online
-        if device.online:
+        if self._is_connected:
             attributes["last_time_reachable"] = dt_util.now().isoformat()
 
         # Add vendor information
-        if device.vendor:
-            attributes["vendor"] = device.vendor
+        if self._device_data.get("vendor"):
+            attributes["vendor"] = self._device_data["vendor"]
 
-        if device.vendor_class:
-            attributes["vendor_class"] = device.vendor_class
+        if self._device_data.get("vendorclass"):
+            attributes["vendor_class"] = self._device_data["vendorclass"]
 
         # Add enhanced device identification
-        if device.device_model:
-            attributes["model"] = device.device_model
+        if self._device_data.get("device_model"):
+            attributes["model"] = self._device_data["device_model"]
 
-        if device.device_friendly_name:
-            attributes["friendly_device_name"] = device.device_friendly_name
+        if self._device_data.get("device_friendly_name"):
+            attributes["friendly_device_name"] = self._device_data["device_friendly_name"]
 
-        if device.device_type:
-            attributes["device_category"] = device.device_type
+        if self._device_data.get("device_type"):
+            attributes["device_category"] = self._device_data["device_type"]
 
-        if device.mdns_services and len(device.mdns_services) > 0:
-            attributes["services"] = ", ".join(device.mdns_services)
+        # Extract mDNS services from metadata
+        services = []
+        meta = self._device_data.get("meta", {})
+        if isinstance(meta, dict):
+            for key in meta.keys():
+                if key.startswith("mdns:_") and key.endswith(":name"):
+                    service_name = key.split(":")[1]
+                    if service_name not in services:
+                        services.append(service_name)
+
+            if services:
+                attributes["services"] = ", ".join(services)
 
         # Add optional attributes only if they have values
-        if device.first_seen:
-            attributes["first_seen"] = device.first_seen
+        if self._device_data.get("first_seen"):
+            attributes["first_seen"] = self._device_data["first_seen"]
 
-        if device.last_seen:
-            attributes["last_seen"] = device.last_seen
+        if self._device_data.get("last_seen"):
+            attributes["last_seen"] = self._device_data["last_seen"]
 
-        if device.type:
-            attributes["device_type"] = device.type
+        if self._device_data.get("type"):
+            attributes["device_type"] = self._device_data["type"]
 
-        if device.os_type:
-            attributes["os_type"] = device.os_type
+        if self._device_data.get("os_type"):
+            attributes["os_type"] = self._device_data["os_type"]
 
-        if device.rssi:
-            attributes["rssi"] = device.rssi
+        if self._device_data.get("rssi"):
+            attributes["rssi"] = self._device_data["rssi"]
 
-        if device.cur_tx:
-            attributes["current_tx_rate"] = device.cur_tx
+        if self._device_data.get("curTx"):
+            attributes["current_tx_rate"] = self._device_data["curTx"]
 
-        if device.cur_rx:
-            attributes["current_rx_rate"] = device.cur_rx
+        if self._device_data.get("curRx"):
+            attributes["current_rx_rate"] = self._device_data["curRx"]
 
-        if device.is_2g:
-            attributes["is_2g"] = device.is_2g
+        if self._device_data.get("2G"):
+            attributes["is_2g"] = self._device_data["2G"]
 
-        if device.is_5g:
-            attributes["is_5g"] = device.is_5g
+        if self._device_data.get("5G"):
+            attributes["is_5g"] = self._device_data["5G"]
 
-        if device.is_wireless:
-            attributes["is_wireless"] = device.is_wireless
+        if self._device_data.get("is_wireless"):
+            attributes["is_wireless"] = self._device_data["is_wireless"]
 
         # Add all meta values as attributes
-        if hasattr(device, "meta") and isinstance(device.meta, dict):
-            for key, value in device.meta.items():
+        if meta and isinstance(meta, dict):
+            for key, value in meta.items():
                 # Convert meta keys to valid attribute names
                 attr_key = key.replace(":", "_").replace(".", "_").lower()
 
@@ -328,25 +292,166 @@ class NetworkMapDeviceTrackerEntity(ScannerEntity):
     @property
     def entity_registry_enabled_default(self) -> bool:
         """Return if entity is enabled by default."""
-        # Enable by default for mobile devices
-        # return self._device.type == 9 or self._device.os_type == 1
         return self.mac_address is not None
 
+    def _generate_better_name(self) -> str:
+        """Generate a better name for a device based on available information."""
+        device_data = self._device_data
+        current_name = device_data.get("name") or f"Device {self._mac_address[-4:]}"
+
+        # First priority: Use the device_friendly_name from mDNS if available
+        device_friendly_name = device_data.get("device_friendly_name")
+        if device_friendly_name and len(device_friendly_name) > 1:
+            vendor = device_data.get("vendor")
+            if vendor and len(vendor) > 1:
+                return f"{device_friendly_name} ({vendor})"
+            return device_friendly_name
+
+        # Second priority: Use hostname
+        name = device_data.get("name")
+        if name and len(name) > 1 and not name.startswith("Device "):
+            # Clean up the hostname - remove .local suffix
+            hostname = name
+            if hostname.endswith(".local"):
+                hostname = hostname[:-6]
+            # Note: Trailing dots are already removed when the device is created
+
+            # If it's a UUID-like hostname and we have a device model, use that instead
+            if (len(hostname) > 30 and "-" in hostname) or hostname.startswith("Android-"):
+                device_model = device_data.get("device_model")
+                if device_model:
+                    vendor = device_data.get("vendor")
+                    if vendor and len(vendor) > 1:
+                        return f"{device_model} ({vendor})"
+                    return device_model
+
+            # If we also have vendor information, include it
+            vendor = device_data.get("vendor")
+            if vendor and len(vendor) > 1:
+                return f"{hostname} ({vendor})"
+
+            # Just the hostname is still good
+            return hostname
+
+        # Third priority: Use device model with vendor
+        device_model = device_data.get("device_model")
+        if device_model and len(device_model) > 1:
+            vendor = device_data.get("vendor")
+            if vendor and len(vendor) > 1:
+                return f"{device_model} ({vendor})"
+            return device_model
+
+        # Fourth priority: If we have vendor but no good hostname
+        vendor = device_data.get("vendor")
+        if vendor and len(vendor) > 1:
+            return f"{vendor} {self._mac_address[-4:]}"
+
+        # No significant improvement possible
+        return current_name
+
+    def _determine_source_type(self) -> str:
+        """Determine the source type based on device data."""
+        # Default value
+        source = "Bettercap"
+
+        # Get device type if available
+        device_type = self._device_data.get("device_type")
+
+        # Check if device has wireless data
+        if (self._device_data.get("is_wireless") or
+            self._device_data.get("rssi") or
+            self._device_data.get("2G") or
+            self._device_data.get("5G")):
+            source = "wifi"
+
+        # Check for Bluetooth devices
+        meta = self._device_data.get("meta", {})
+        if isinstance(meta, dict) and ("bluetooth" in meta or "bt" in meta):
+            source = "bluetooth"
+
+        # Override based on device type if available
+        if device_type == "cast":
+            source = "cast"
+        elif device_type == "esphome":
+            source = "esphome"
+        elif device_type == "homekit":
+            source = "homekit"
+        elif device_type == "android_tv":
+            source = "android_tv"
+
+        return source
+
+    def _determine_icon(self) -> str:
+        """Determine the icon based on device data."""
+        # Default icon
+        icon = "mdi:lan-connect"
+
+        # Check if device has wireless data
+        if (self._device_data.get("is_wireless") or
+            self._device_data.get("rssi") or
+            self._device_data.get("2G") or
+            self._device_data.get("5G")):
+            icon = "mdi:wifi"
+
+        # Check for Bluetooth devices
+        meta = self._device_data.get("meta", {})
+        if isinstance(meta, dict) and ("bluetooth" in meta or "bt" in meta):
+            icon = "mdi:bluetooth"
+
+        # Check for specific device types based on vendor
+        vendor = self._device_data.get("vendor", "")
+        if vendor:
+            vendor = vendor.lower()
+            if "apple" in vendor or "iphone" in vendor or "ipad" in vendor or "macbook" in vendor:
+                icon = "mdi:apple"
+            elif "google" in vendor or "android" in vendor:
+                icon = "mdi:android"
+            elif "amazon" in vendor or "kindle" in vendor or "echo" in vendor:
+                icon = "mdi:amazon"
+            elif "microsoft" in vendor or "windows" in vendor or "xbox" in vendor:
+                icon = "mdi:microsoft"
+            elif "samsung" in vendor:
+                icon = "mdi:cellphone"
+            elif "sonos" in vendor:
+                icon = "mdi:speaker"
+            elif "philips" in vendor or "hue" in vendor:
+                icon = "mdi:lightbulb"
+            elif "xiaomi" in vendor:
+                icon = "mdi:xiaomi"
+            elif "espressif" in vendor:
+                icon = "mdi:chip"
+            elif "raspberry" in vendor:
+                icon = "mdi:raspberry-pi"
+            elif "asus" in vendor:
+                icon = "mdi:router-network"
+
+        # Override based on device type if available
+        device_type = self._device_data.get("device_type")
+        if device_type == "cast":
+            icon = "mdi:cast"
+        elif device_type == "esphome":
+            icon = "mdi:chip"
+        elif device_type == "homekit":
+            icon = "mdi:home-automation"
+        elif device_type == "android_tv":
+            icon = "mdi:android-tv"
+
+        return icon
+
     @callback
-    def async_on_demand_update(self, online: bool) -> None:
-        """Update state."""
-        try:
-            self._active = online
-            self.async_write_ha_state()
-        except Exception as ex:
-            _LOGGER.error("Error updating device %s: %s", self._mac_address, ex)
+    def async_process_update(self, device_data: dict[str, Any]) -> None:
+        """Process device data update."""
+        self._device_data = device_data
+        self._is_connected = True
+        self.async_write_ha_state()
+
+    @callback
+    def async_mark_offline(self) -> None:
+        """Mark device as offline."""
+        self._is_connected = False
+        self.async_write_ha_state()
 
     async def async_added_to_hass(self) -> None:
         """Register state update callback."""
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass,
-                signal_device_update(self._mac_address),
-                self.async_on_demand_update,
-            )
-        )
+        # No need for callbacks as we're using the new signal structure
+        pass
