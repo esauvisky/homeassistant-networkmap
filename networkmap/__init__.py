@@ -43,7 +43,6 @@ from .const import (
     CONF_ENABLE_NET_PROBE,
     CONF_ENABLE_NET_SNIFF,
     CONF_ENABLE_ARP_SPOOF,
-    CONF_ENABLE_TICKER,
     CONF_ENABLE_NET_RECON,
     CONF_ENABLE_ZEROGOD,
     BETTERCAP_NET_PROBE_ON,
@@ -52,8 +51,6 @@ from .const import (
     BETTERCAP_NET_SNIFF_OFF,
     BETTERCAP_ARP_SPOOF_ON,
     BETTERCAP_ARP_SPOOF_OFF,
-    BETTERCAP_TICKER_ON,
-    BETTERCAP_TICKER_OFF,
     BETTERCAP_NET_RECON_ON,
     BETTERCAP_NET_RECON_OFF,
     BETTERCAP_NET_SHOW_META_ON,
@@ -400,9 +397,6 @@ class NetworkDeviceScanner:
         if self._config.get(CONF_ENABLE_ARP_SPOOF, False):
             modules_to_enable.append(BETTERCAP_ARP_SPOOF_ON)
 
-        if self._config.get(CONF_ENABLE_TICKER, False):
-            modules_to_enable.append(BETTERCAP_TICKER_ON)
-
         if self._config.get(CONF_ENABLE_NET_RECON, False):
             modules_to_enable.append(BETTERCAP_NET_RECON_ON)
             modules_to_enable.append(BETTERCAP_NET_SHOW_META_ON)
@@ -448,9 +442,6 @@ class NetworkDeviceScanner:
 
         if self._config.get(CONF_ENABLE_ARP_SPOOF, False):
             modules_to_disable.append(BETTERCAP_ARP_SPOOF_OFF)
-
-        if self._config.get(CONF_ENABLE_TICKER, False):
-            modules_to_disable.append(BETTERCAP_TICKER_OFF)
 
         if self._config.get(CONF_ENABLE_NET_RECON, False):
             modules_to_disable.append(BETTERCAP_NET_RECON_OFF)
