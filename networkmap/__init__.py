@@ -187,11 +187,11 @@ class NetworkDeviceScanner:
         # Define which modules to enable based on config
         modules_to_enable = []
 
-        if self._config.get(CONF_ENABLE_NET_PROBE, True):
-            modules_to_enable.append(BETTERCAP_NET_PROBE_ON)
-
         if self._config.get(CONF_ENABLE_ZEROGOD, False):
             modules_to_enable.append(BETTERCAP_ZEROGOD_DISCOVERY_ON)
+
+        if self._config.get(CONF_ENABLE_NET_PROBE, True):
+            modules_to_enable.append(BETTERCAP_NET_PROBE_ON)
 
         if self._config.get(CONF_ENABLE_NET_RECON, False):
             modules_to_enable.append(BETTERCAP_NET_RECON_ON)
@@ -273,25 +273,9 @@ class NetworkDeviceScanner:
                                 meta = host.get("meta", {})
                                 if isinstance(meta, dict) and "values" in meta:
                                     meta = meta.get("values", {})
-
-                                # Determine if device is wireless
-                                is_wireless = False
-                                if "wireless" in meta or "wifi" in meta:
-                                    is_wireless = True
-
-                                # Extract traffic data if available
-                                traffic_data = {}
-                                if "packets" in session_data and "Traffic" in session_data["packets"]:
-                                    ip = host.get("ipv4")
-                                    if ip and ip in session_data["packets"]["Traffic"]:
-                                        traffic_data = session_data["packets"]["Traffic"][ip]
-
-                                # We've removed wireless detection
-
                                 # Extract useful metadata for device identification
                                 device_model = None
                                 device_friendly_name = None
-                                device_type = None
 
                                 # Look for device model/type in metadata
                                 if isinstance(meta, dict):
@@ -306,16 +290,6 @@ class NetworkDeviceScanner:
                                         device_friendly_name = meta.get("mdns:friendly_name")
                                     if "mdns:platform" in meta and "mdns:board" in meta:
                                         device_model = f"{meta.get('mdns:platform')} ({meta.get('mdns:board')})"
-
-                                    # Determine device type based on services
-                                    if any(k.startswith("mdns:_googlecast") for k in meta.keys()):
-                                        device_type = "cast"
-                                    elif any(k.startswith("mdns:_esphomelib") for k in meta.keys()):
-                                        device_type = "esphome"
-                                    elif any(k.startswith("mdns:_hap") for k in meta.keys()):
-                                        device_type = "homekit"
-                                    elif any(k.startswith("mdns:_androidtvremote") for k in meta.keys()):
-                                        device_type = "android_tv"
 
                                 # Get hostname and remove any trailing dots
                                 hostname = host.get("hostname", "")
@@ -332,8 +306,7 @@ class NetworkDeviceScanner:
                                     "first_seen": host.get("first_seen", ""),
                                     "meta": meta,
                                     "device_model": device_model,
-                                    "device_friendly_name": device_friendly_name,
-                                    "device_type": device_type
+                                    "device_friendly_name": device_friendly_name
                                 }
                                 devices[mac] = device_data
                                 _LOGGER.debug("Found device from session/lan/hosts: %s (%s) - %s",
