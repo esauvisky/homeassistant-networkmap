@@ -379,13 +379,34 @@ class NetworkMapDiagnosticSensor(SensorEntity):
         device_name = self._generate_better_name()
         
         # Create device info that links to the same device as the tracker
-        return DeviceInfo(
+        info = DeviceInfo(
             identifiers={(DOMAIN, self._mac_address)},
             name=device_name,
             connections={("mac", self._mac_address)},
             manufacturer=self._raw_data.get("vendor"),
-            model=self._raw_data.get("device_model"),
         )
+
+        # Add model with priority order
+        meta = self._raw_data.get("meta", {})
+
+        # Determine model with priority order
+        model = None
+        if self._raw_data.get("device_model"):
+            model = self._raw_data["device_model"]
+        elif isinstance(meta, dict) and "mdns:md" in meta:
+            model = meta["mdns:md"]
+        elif (isinstance(meta, dict) and "mdns:platform" in meta
+              and "mdns:board" in meta):
+            model = f"{meta['mdns:platform']} ({meta['mdns:board']})"
+
+        if model:
+            info["model"] = model
+
+        # Add firmware version if available
+        if isinstance(meta, dict) and "mdns:version" in meta:
+            info["sw_version"] = meta["mdns:version"]
+
+        return info
     
     def _generate_better_name(self) -> str:
         """Generate a better name for a device based on available information."""
@@ -400,35 +421,41 @@ class NetworkMapDiagnosticSensor(SensorEntity):
         if key == "vendor":
             self._attr_native_value = self._raw_data.get("vendor")
         
-        elif key == "os_type":
-            self._attr_native_value = self._raw_data.get("os_type")
-        
         elif key == "device_model":
             self._attr_native_value = self._raw_data.get("device_model")
         
-        elif key == "rssi":
-            rssi = self._raw_data.get("rssi")
-            if rssi and rssi.isdigit():
-                self._attr_native_value = int(rssi)
-            else:
-                self._attr_native_value = None
-        
-        elif key == "mdns_services":
-            # Extract mDNS services from metadata
-            services = []
-            meta = self._raw_data.get("meta", {})
-            if isinstance(meta, dict):
-                for meta_key in meta.keys():
-                    if meta_key.startswith("mdns:_") and meta_key.endswith(":name"):
-                        service_name = meta_key.split(":")[1]
-                        if service_name not in services:
-                            services.append(service_name)
-            
-            if services:
-                self._attr_native_value = ", ".join(services)
-            else:
-                self._attr_native_value = None
-        
+        elif key == SENSOR_TYPE_MDNS_NAME:
+            self._attr_native_value = get_mdns_value(self._raw_data, "fn") or get_mdns_value(self._raw_data, "friendly_name")
+
+        elif key == SENSOR_TYPE_MDNS_MODEL:
+            self._attr_native_value = get_mdns_value(self._raw_data, "md")
+
+        elif key == SENSOR_TYPE_MDNS_HOSTNAME:
+            self._attr_native_value = get_mdns_value(self._raw_data, "hostname")
+
+        elif key == SENSOR_TYPE_MDNS_SERVICE_ID:
+            self._attr_native_value = get_mdns_value(self._raw_data, "id")
+
+        elif key == SENSOR_TYPE_FIRMWARE_VERSION:
+            self._attr_native_value = get_mdns_value(self._raw_data, "version")
+
+        elif key == SENSOR_TYPE_MDNS_BOARD:
+            self._attr_native_value = get_mdns_value(self._raw_data, "board")
+
+        elif key == SENSOR_TYPE_MDNS_PLATFORM:
+            self._attr_native_value = get_mdns_value(self._raw_data, "platform")
+
+        elif key == SENSOR_TYPE_UPNP_SERVER:
+            self._attr_native_value = get_meta_value(self._raw_data, "upnp", "Server")
+
+        elif key == SENSOR_TYPE_NBNS_HOSTNAME:
+            self._attr_native_value = get_meta_value(self._raw_data, "nbns", "hostname")
+
+        elif key == SENSOR_TYPE_MDNS_OTHER:
+            self._attr_native_value = get_other_mdns_values(self._raw_data)
+
+        elif key == SENSOR_TYPE_OTHER_PROTOCOLS:
+            self._attr_native_value = get_non_mdns_values(self._raw_data)
     
     @callback
     def async_process_update(self, device_data: dict[str, Any]) -> None:
