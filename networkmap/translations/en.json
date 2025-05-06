@@ -18,7 +18,6 @@
                     "api_key": "API Key (if required)",
                     "enable_net_probe": "Enable network probing (discovers devices)",
                     "enable_net_sniff": "Enable network sniffing (captures traffic)",
-                    "enable_arp_spoof": "Enable ARP spoofing (MITM, use with caution)",
                     "enable_net_recon": "Enable network reconnaissance (ARP cache monitoring)",
                     "enable_zerogod": "Enable Zeroconf/mDNS discovery (finds Bonjour services)"
                 },

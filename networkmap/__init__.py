@@ -37,30 +37,22 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     CONF_SCAN_INTERVAL,
     DEVICE_SCAN_INTERVAL,
-    MIN_SCAN_INTERVAL,
     CONF_API_KEY,
     BETTERCAP_API_URL,
     CONF_ENABLE_NET_PROBE,
     CONF_ENABLE_NET_SNIFF,
-    CONF_ENABLE_ARP_SPOOF,
     CONF_ENABLE_NET_RECON,
     CONF_ENABLE_ZEROGOD,
     BETTERCAP_NET_PROBE_ON,
     BETTERCAP_NET_PROBE_OFF,
     BETTERCAP_NET_SNIFF_ON,
     BETTERCAP_NET_SNIFF_OFF,
-    BETTERCAP_ARP_SPOOF_ON,
-    BETTERCAP_ARP_SPOOF_OFF,
     BETTERCAP_NET_RECON_ON,
     BETTERCAP_NET_RECON_OFF,
     BETTERCAP_NET_SHOW_META_ON,
     BETTERCAP_ZEROGOD_DISCOVERY_ON,
     BETTERCAP_ZEROGOD_DISCOVERY_OFF,
-    BETTERCAP_NET_PROBE_TARGET,
-    BETTERCAP_ARP_PROBE_TARGET,
-    BETTERCAP_PING_TARGET,
-    VERIFICATION_ATTEMPTS,
-    VERIFICATION_DELAY,
+    VERIFICATION_ATTEMPTS
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -391,18 +383,15 @@ class NetworkDeviceScanner:
         if self._config.get(CONF_ENABLE_NET_PROBE, True):
             modules_to_enable.append(BETTERCAP_NET_PROBE_ON)
 
-        if self._config.get(CONF_ENABLE_NET_SNIFF, False):
-            modules_to_enable.append(BETTERCAP_NET_SNIFF_ON)
-
-        if self._config.get(CONF_ENABLE_ARP_SPOOF, False):
-            modules_to_enable.append(BETTERCAP_ARP_SPOOF_ON)
+        if self._config.get(CONF_ENABLE_ZEROGOD, False):
+            modules_to_enable.append(BETTERCAP_ZEROGOD_DISCOVERY_ON)
 
         if self._config.get(CONF_ENABLE_NET_RECON, False):
             modules_to_enable.append(BETTERCAP_NET_RECON_ON)
             modules_to_enable.append(BETTERCAP_NET_SHOW_META_ON)
 
-        if self._config.get(CONF_ENABLE_ZEROGOD, False):
-            modules_to_enable.append(BETTERCAP_ZEROGOD_DISCOVERY_ON)
+        if self._config.get(CONF_ENABLE_NET_SNIFF, False):
+            modules_to_enable.append(BETTERCAP_NET_SNIFF_ON)
 
         # Enable each module
         for cmd in modules_to_enable:
@@ -439,9 +428,6 @@ class NetworkDeviceScanner:
 
         if self._config.get(CONF_ENABLE_NET_SNIFF, False):
             modules_to_disable.append(BETTERCAP_NET_SNIFF_OFF)
-
-        if self._config.get(CONF_ENABLE_ARP_SPOOF, False):
-            modules_to_disable.append(BETTERCAP_ARP_SPOOF_OFF)
 
         if self._config.get(CONF_ENABLE_NET_RECON, False):
             modules_to_disable.append(BETTERCAP_NET_RECON_OFF)
@@ -556,10 +542,6 @@ class NetworkDeviceScanner:
                                 _LOGGER.debug("Found device from session/lan/hosts: %s (%s) - %s",
                                               device_data.get("name"), mac, device_data.get("ip"))
 
-            # If no devices found in session data, try the dedicated LAN endpoint
-            if not devices:
-                await self._fetch_lan_devices(devices)
-
             return devices
 
         except aiohttp.ClientError as err:
@@ -568,69 +550,6 @@ class NetworkDeviceScanner:
         except Exception as e:
             _LOGGER.error("Unexpected error fetching device data: %s", e)
             return None
-
-    async def _fetch_lan_devices(self, devices: dict) -> None:
-        """Fetch LAN devices from dedicated endpoint."""
-        try:
-            # Try the /session/lan endpoint
-            async with self._session.get(f"{self._api_url}/session/lan",
-                                         auth=self._auth,
-                                         headers=self._headers,
-                                         timeout=10) as response:
-                if response.status == 200:
-                    lan_data = await response.json()
-                    _LOGGER.debug("Bettercap LAN API response: %s", lan_data)
-                    for host in lan_data.get("hosts", []):
-                        mac = host.get("mac", "").lower()
-                        if mac and mac != "--" and mac != "-":
-                            meta = host.get("meta", {})
-                            if isinstance(meta, dict) and "values" in meta:
-                                meta = meta.get("values", {})
-
-                            # Extract useful metadata for device identification
-                            device_model = None
-                            device_friendly_name = None
-                            device_type = None
-
-                            # Look for device model/type in metadata
-                            if isinstance(meta, dict):
-                                # Check for Google Cast devices
-                                if "mdns:md" in meta:
-                                    device_model = meta.get("mdns:md")
-                                if "mdns:fn" in meta:
-                                    device_friendly_name = meta.get("mdns:fn")
-
-                                # Check for ESPHome devices
-                                if "mdns:friendly_name" in meta:
-                                    device_friendly_name = meta.get("mdns:friendly_name")
-                                if "mdns:platform" in meta and "mdns:board" in meta:
-                                    device_model = f"{meta.get('mdns:platform')} ({meta.get('mdns:board')})"
-
-                                # Determine device type based on services
-                                if any(k.startswith("mdns:_googlecast") for k in meta.keys()):
-                                    device_type = "cast"
-                                elif any(k.startswith("mdns:_esphomelib") for k in meta.keys()):
-                                    device_type = "esphome"
-                                elif any(k.startswith("mdns:_hap") for k in meta.keys()):
-                                    device_type = "homekit"
-                                elif any(k.startswith("mdns:_androidtvremote") for k in meta.keys()):
-                                    device_type = "android_tv"
-
-                            # Get hostname and remove any trailing dots
-                            hostname = host.get("hostname", "")
-                            while hostname and hostname.endswith("."):
-                                hostname = hostname[:-1]
-
-                            device_data = {
-                                "name": hostname, "ip": host.get("ipv4", ""), "vendor": host.get(
-                                    "vendor", ""), "vendorclass": host.get("vendor", ""), "online": True, "is_wireless": False, "last_seen": host.get(
-                                        "last_seen", ""), "first_seen": host.get("first_seen", ""), "meta": meta,
-                                "device_model": device_model, "device_friendly_name": device_friendly_name, "device_type": device_type}
-                            devices[mac] = device_data
-                            _LOGGER.debug("Found device from /session/lan endpoint: %s (%s) - %s",
-                                          device_data.get("name"), mac, device_data.get("ip"))
-        except aiohttp.ClientError as err:
-            _LOGGER.error("Error fetching LAN devices: %s", err)
 
     async def _async_scan_devices(self, *_):
         """Scan for devices and update device trackers."""
