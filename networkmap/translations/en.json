@@ -41,6 +41,39 @@
             },
             "device_model": {
                 "name": "Model"
+            },
+            "mdns_friendly_name": {
+                "name": "mDNS Reported Name"
+            },
+            "mdns_model": {
+                "name": "mDNS Reported Model"
+            },
+            "mdns_hostname": {
+                "name": "mDNS Hostname"
+            },
+            "mdns_service_id": {
+                "name": "mDNS Service ID"
+            },
+            "firmware_version": {
+                "name": "Firmware Version (mDNS)"
+            },
+            "mdns_board": {
+                "name": "mDNS Board"
+            },
+            "mdns_platform": {
+                "name": "mDNS Platform"
+            },
+            "upnp_server": {
+                "name": "UPnP Server"
+            },
+            "nbns_hostname": {
+                "name": "NetBIOS Name"
+            },
+            "mdns_other_values": {
+                "name": "Additional mDNS Data"
+            },
+            "other_protocol_values": {
+                "name": "Additional Protocol Data"
             }
         },
         "device_tracker": {

@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Set, List, Optional, Callable
+from typing import Any, Dict, Set, List, Optional, Callable, Protocol
+import json
 
 from homeassistant.components.sensor import (
     SensorEntity,
@@ -22,6 +23,127 @@ from .utils import get_short_manufacturer
 
 _LOGGER = logging.getLogger(__name__)
 
+# Define custom sensor types
+SENSOR_TYPE_MDNS_NAME = "mdns_friendly_name"
+SENSOR_TYPE_MDNS_MODEL = "mdns_model"
+SENSOR_TYPE_MDNS_HOSTNAME = "mdns_hostname"
+SENSOR_TYPE_MDNS_SERVICE_ID = "mdns_service_id"
+SENSOR_TYPE_FIRMWARE_VERSION = "firmware_version"
+SENSOR_TYPE_MDNS_BOARD = "mdns_board"
+SENSOR_TYPE_MDNS_PLATFORM = "mdns_platform"
+SENSOR_TYPE_UPNP_SERVER = "upnp_server"
+SENSOR_TYPE_NBNS_HOSTNAME = "nbns_hostname"
+SENSOR_TYPE_MDNS_OTHER = "mdns_other_values"
+SENSOR_TYPE_OTHER_PROTOCOLS = "other_protocol_values"
+
+# Helper functions for value extraction
+def get_mdns_value(device_data: Dict[str, Any], key: str) -> Any:
+    """Get a value from the mdns metadata."""
+    meta = device_data.get("meta", {})
+    if isinstance(meta, dict):
+        return meta.get(f"mdns:{key}")
+    return None
+
+def get_meta_value(device_data: Dict[str, Any], protocol: str, key: str) -> Any:
+    """Get a value from metadata with protocol prefix."""
+    meta = device_data.get("meta", {})
+    if isinstance(meta, dict):
+        return meta.get(f"{protocol}:{key}")
+    return None
+
+def has_mdns_key(device_data: Dict[str, Any], key: str) -> bool:
+    """Check if device has a specific mdns key."""
+    meta = device_data.get("meta", {})
+    if isinstance(meta, dict):
+        return f"mdns:{key}" in meta
+    return False
+
+def has_meta_key(device_data: Dict[str, Any], protocol: str, key: str) -> bool:
+    """Check if device has a specific metadata key with protocol prefix."""
+    meta = device_data.get("meta", {})
+    if isinstance(meta, dict):
+        return f"{protocol}:{key}" in meta
+    return False
+
+def has_any_meta_prefix(device_data: Dict[str, Any], prefix: str) -> bool:
+    """Check if device has any metadata with given prefix."""
+    meta = device_data.get("meta", {})
+    if isinstance(meta, dict):
+        return any(k.startswith(prefix) for k in meta.keys())
+    return False
+
+def get_other_mdns_values(device_data: Dict[str, Any]) -> str:
+    """Get all mdns values that aren't explicitly handled."""
+    meta = device_data.get("meta", {})
+    if not isinstance(meta, dict):
+        return "{}"
+
+    # Keys that are already handled by specific sensors
+    handled_keys = {
+        "mdns:fn", "mdns:friendly_name", "mdns:md", "mdns:hostname",
+        "mdns:id", "mdns:version", "mdns:board", "mdns:platform"
+    }
+
+    # Collect all other mdns values
+    other_values = {}
+    for k, v in meta.items():
+        if k.startswith("mdns:") and k not in handled_keys:
+            other_values[k] = v
+
+    return json.dumps(other_values, sort_keys=True)
+
+def get_non_mdns_values(device_data: Dict[str, Any]) -> str:
+    """Get all non-mdns metadata values."""
+    meta = device_data.get("meta", {})
+    if not isinstance(meta, dict):
+        return "{}"
+
+    # Collect all non-mdns values
+    other_values = {}
+    for k, v in meta.items():
+        if not k.startswith("mdns:") and not k.startswith("_"):
+            other_values[k] = v
+
+    return json.dumps(other_values, sort_keys=True)
+
+def should_create_sensor(sensor_type: str, device_data: Dict[str, Any]) -> bool:
+    """Determine if a sensor should be created for this device."""
+    if sensor_type == SENSOR_TYPE_MDNS_NAME:
+        return has_mdns_key(device_data, "fn") or has_mdns_key(device_data, "friendly_name")
+
+    elif sensor_type == SENSOR_TYPE_MDNS_MODEL:
+        return has_mdns_key(device_data, "md")
+
+    elif sensor_type == SENSOR_TYPE_MDNS_HOSTNAME:
+        return has_mdns_key(device_data, "hostname")
+
+    elif sensor_type == SENSOR_TYPE_MDNS_SERVICE_ID:
+        return has_mdns_key(device_data, "id")
+
+    elif sensor_type == SENSOR_TYPE_FIRMWARE_VERSION:
+        return has_mdns_key(device_data, "version")
+
+    elif sensor_type == SENSOR_TYPE_MDNS_BOARD:
+        return has_mdns_key(device_data, "board")
+
+    elif sensor_type == SENSOR_TYPE_MDNS_PLATFORM:
+        return has_mdns_key(device_data, "platform")
+
+    elif sensor_type == SENSOR_TYPE_UPNP_SERVER:
+        return has_meta_key(device_data, "upnp", "Server")
+
+    elif sensor_type == SENSOR_TYPE_NBNS_HOSTNAME:
+        return has_meta_key(device_data, "nbns", "hostname")
+
+    elif sensor_type == SENSOR_TYPE_MDNS_OTHER:
+        return has_any_meta_prefix(device_data, "mdns:")
+
+    elif sensor_type == SENSOR_TYPE_OTHER_PROTOCOLS:
+        return isinstance(device_data.get("meta"), dict) and bool(device_data.get("meta"))
+
+    # Default sensors like vendor and device_model are always created
+    return True
+
 # Define sensor descriptions for diagnostic data
 SENSOR_DESCRIPTIONS = [
     SensorEntityDescription(
@@ -37,6 +159,94 @@ SENSOR_DESCRIPTIONS = [
         icon="mdi:devices",
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=True,
+    ),
+    # mDNS Friendly Name
+    SensorEntityDescription(
+        key=SENSOR_TYPE_MDNS_NAME,
+        name="mDNS Reported Name",
+        icon="mdi:tag-text",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=True,
+    ),
+    # mDNS Model
+    SensorEntityDescription(
+        key=SENSOR_TYPE_MDNS_MODEL,
+        name="mDNS Reported Model",
+        icon="mdi:devices",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=True,
+    ),
+    # mDNS Hostname
+    SensorEntityDescription(
+        key=SENSOR_TYPE_MDNS_HOSTNAME,
+        name="mDNS Hostname",
+        icon="mdi:web",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=True,
+    ),
+    # mDNS Service ID
+    SensorEntityDescription(
+        key=SENSOR_TYPE_MDNS_SERVICE_ID,
+        name="mDNS Service ID",
+        icon="mdi:identifier",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=True,
+    ),
+    # Firmware Version
+    SensorEntityDescription(
+        key=SENSOR_TYPE_FIRMWARE_VERSION,
+        name="Firmware Version (mDNS)",
+        icon="mdi:chip",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=True,
+    ),
+    # ESPHome Board
+    SensorEntityDescription(
+        key=SENSOR_TYPE_MDNS_BOARD,
+        name="mDNS Board",
+        icon="mdi:circuit-board",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+    ),
+    # ESPHome Platform
+    SensorEntityDescription(
+        key=SENSOR_TYPE_MDNS_PLATFORM,
+        name="mDNS Platform",
+        icon="mdi:chip",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+    ),
+    # UPnP Server
+    SensorEntityDescription(
+        key=SENSOR_TYPE_UPNP_SERVER,
+        name="UPnP Server",
+        icon="mdi:server",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+    ),
+    # NetBIOS Name
+    SensorEntityDescription(
+        key=SENSOR_TYPE_NBNS_HOSTNAME,
+        name="NetBIOS Name",
+        icon="mdi:microsoft-windows",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+    ),
+    # Other mDNS Values
+    SensorEntityDescription(
+        key=SENSOR_TYPE_MDNS_OTHER,
+        name="Additional mDNS Data",
+        icon="mdi:code-json",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+    ),
+    # Other Protocol Values
+    SensorEntityDescription(
+        key=SENSOR_TYPE_OTHER_PROTOCOLS,
+        name="Additional Protocol Data",
+        icon="mdi:code-json",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
     ),
 ]
 
@@ -63,13 +273,18 @@ async def async_setup_entry(
             tracked_sensors[mac_address] = {}
             
         for description in SENSOR_DESCRIPTIONS:
-            # Create a unique ID for this sensor
-            unique_id = f"{DOMAIN}_{entry.entry_id.split('-')[0]}_{mac_address}_{description.key}"
-            
             # Skip if we already have this sensor
             if description.key in tracked_sensors.get(mac_address, {}):
                 continue
                 
+            # Check if this sensor should exist for this device
+            if not should_create_sensor(description.key, device_data):
+                # Skip this sensor if the data doesn't exist
+                continue
+
+            # Create a unique ID for this sensor
+            unique_id = f"{DOMAIN}_{entry.entry_id.split('-')[0]}_{mac_address}_{description.key}"
+
             # Create the sensor entity
             sensor = NetworkMapDiagnosticSensor(
                 entry_id=entry.entry_id,
