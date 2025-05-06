@@ -11,9 +11,12 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.device_registry import DeviceInfo
+
 
 from . import signal_device_new, signal_device_updated, signal_device_offline
 from .const import DOMAIN
+from .utils import get_short_manufacturer
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -107,7 +110,7 @@ class NetworkMapDeviceTrackerEntity(ScannerEntity):
         self._attr_unique_id = f"{DOMAIN}_{short_entry_id}_{mac_address}"
 
         # Extract basic info for logging
-        name = device_data.get("name") or f"Unknown {mac_address[-4:]}"
+        name = device_data.get("name") or f"Unknown {mac_address[-5:]}"
         _LOGGER.debug("Initializing device tracker entity: name=%s, mac=%s, unique_id=%s",
                      name, mac_address, self._attr_unique_id)
 
@@ -129,90 +132,22 @@ class NetworkMapDeviceTrackerEntity(ScannerEntity):
     @property
     def manufacturer(self) -> str | None:
         """Return manufacturer of the device."""
-        return self._raw_data.get("vendor")
+        raw_vendor = self._raw_data.get("vendor")
+        if not raw_vendor:
+            return None
+
+        return get_short_manufacturer(raw_vendor)
 
     @property
     def icon(self) -> str:
         """Return the icon to use in the frontend."""
-        # Default icon
-        icon = "mdi:lan-connect"
+        from .utils import determine_icon
+        return determine_icon(self._raw_data)
 
-        # Check if device has wireless data
-        if (self._raw_data.get("is_wireless") or
-            self._raw_data.get("rssi") or
-            self._raw_data.get("2G") or
-            self._raw_data.get("5G")):
-            icon = "mdi:wifi"
-
-        # Check for Bluetooth devices
-        meta = self._raw_data.get("meta", {})
-        if isinstance(meta, dict) and ("bluetooth" in meta or "bt" in meta):
-            icon = "mdi:bluetooth"
-
-        # Check for specific device types based on vendor
-        vendor = self._raw_data.get("vendor", "")
-        if vendor:
-            vendor = vendor.lower()
-            if "apple" in vendor or "iphone" in vendor or "ipad" in vendor or "macbook" in vendor:
-                icon = "mdi:apple"
-            elif "google" in vendor or "android" in vendor:
-                icon = "mdi:android"
-            elif "amazon" in vendor or "kindle" in vendor or "echo" in vendor:
-                icon = "mdi:amazon"
-            elif "microsoft" in vendor or "windows" in vendor or "xbox" in vendor:
-                icon = "mdi:microsoft"
-            elif "samsung" in vendor:
-                icon = "mdi:cellphone"
-            elif "sonos" in vendor:
-                icon = "mdi:speaker"
-            elif "philips" in vendor or "hue" in vendor:
-                icon = "mdi:lightbulb"
-            # elif "xiaomi" in vendor:
-            #     icon = "mdi:xiaomi"
-            elif "espressif" in vendor:
-                icon = "mdi:chip"
-            elif "raspberry" in vendor:
-                icon = "mdi:raspberry-pi"
-            elif "asus" in vendor:
-                icon = "mdi:router-network"
-
-        # Override based on device type if available
-        device_type = self._raw_data.get("device_type")
-        if device_type == "cast":
-            icon = "mdi:cast"
-        elif device_type == "esphome":
-            icon = "mdi:chip"
-        elif device_type == "homekit":
-            icon = "mdi:home-automation"
-        elif device_type == "android_tv":
-            icon = "mdi:cast"
-
-        return icon
-
-    @property
-    def source_type(self) -> str:
-        """Return the source type of the device."""
-        from homeassistant.components.device_tracker import SourceType
-
-        # Default source type
-        source_type = SourceType.ROUTER
-
-        # Check for Bluetooth devices
-        meta = self._raw_data.get("meta", {})
-        if isinstance(meta, dict) and ("bluetooth" in meta or "bt" in meta):
-            source_type = SourceType.BLUETOOTH
-
-        # Check for GPS devices (unlikely in this integration, but included for completeness)
-        if self._raw_data.get("gps") or self._raw_data.get("location"):
-            source_type = SourceType.GPS
-
-        return source_type
 
     @property
     def device_info(self):
         """Return device information for the device registry."""
-        from homeassistant.helpers.device_registry import DeviceInfo
-
         # Generate a better name for the device
         device_name = self._generate_better_name()
 
@@ -238,16 +173,13 @@ class NetworkMapDeviceTrackerEntity(ScannerEntity):
         """Return device state attributes."""
         attributes = {
             # Only include essential attributes
-            "host_name": self._raw_data.get("name") or f"device_{self._mac_address[-4:]}",
+            "host_name": self._raw_data.get("name") or f"device_{self._mac_address[-5:]}",
         }
 
         # Add last_seen timestamp if available
         if self._raw_data.get("last_seen"):
             attributes["last_seen"] = self._raw_data["last_seen"]
 
-        # Add RSSI for wireless devices
-        if self._raw_data.get("rssi"):
-            attributes["rssi"] = self._raw_data["rssi"]
 
         return attributes
 
@@ -258,58 +190,8 @@ class NetworkMapDeviceTrackerEntity(ScannerEntity):
 
     def _generate_better_name(self) -> str:
         """Generate a better name for a device based on available information."""
-        device_data = self._raw_data
-        current_name = device_data.get("name") or f"Device {self._mac_address[-4:]}"
-
-        # First priority: Use the device_friendly_name from mDNS if available
-        device_friendly_name = device_data.get("device_friendly_name")
-        if device_friendly_name and len(device_friendly_name) > 1:
-            vendor = device_data.get("vendor")
-            if vendor and len(vendor) > 1:
-                return f"{device_friendly_name} ({vendor})"
-            return device_friendly_name
-
-        # Second priority: Use hostname
-        name = device_data.get("name")
-        if name and len(name) > 1 and not name.startswith("Device "):
-            # Clean up the hostname - remove .local suffix
-            hostname = name
-            if hostname.endswith(".local"):
-                hostname = hostname[:-6]
-            # Note: Trailing dots are already removed when the device is created
-
-            # If it's a UUID-like hostname and we have a device model, use that instead
-            if (len(hostname) > 30 and "-" in hostname) or hostname.startswith("Android-"):
-                device_model = device_data.get("device_model")
-                if device_model:
-                    vendor = device_data.get("vendor")
-                    if vendor and len(vendor) > 1:
-                        return f"{device_model} ({vendor})"
-                    return device_model
-
-            # If we also have vendor information, include it
-            vendor = device_data.get("vendor")
-            if vendor and len(vendor) > 1:
-                return f"{hostname} ({vendor})"
-
-            # Just the hostname is still good
-            return hostname
-
-        # Third priority: Use device model with vendor
-        device_model = device_data.get("device_model")
-        if device_model and len(device_model) > 1:
-            vendor = device_data.get("vendor")
-            if vendor and len(vendor) > 1:
-                return f"{device_model} ({vendor})"
-            return device_model
-
-        # Fourth priority: If we have vendor but no good hostname
-        vendor = device_data.get("vendor")
-        if vendor and len(vendor) > 1:
-            return f"{vendor} {self._mac_address[-4:]}"
-
-        # No significant improvement possible
-        return current_name
+        from .utils import generate_better_name
+        return generate_better_name(self._raw_data, self._mac_address)
 
     @callback
     def async_process_update(self, device_data: dict[str, Any]) -> None:
